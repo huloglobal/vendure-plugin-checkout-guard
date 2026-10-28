@@ -210,8 +210,8 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                     <div class="banner-line" *ngIf="meta.recentStats?.length"><strong>So far:</strong> {{ statsLine() }}</div>
                 </div>
                 <div class="actions eval-actions">
-                    <select [(ngModel)]="buyPlan" [disabled]="buying" class="plan-select"><option value="monthly">Monthly · 14-day free trial</option><option value="annual">Annual · 14-day free trial, 2 months free</option><option value="lifetime">Lifetime · one-off</option></select>
-                    <button class="gbtn gbtn-primary gbtn-sm" (click)="buyLicence()" [disabled]="buying">{{ buying ? 'Opening checkout…' : (buyPlan === 'lifetime' ? 'Buy lifetime →' : 'Start 14-day free trial →') }}</button>
+                    <select [(ngModel)]="buyPlan" [disabled]="buying" class="plan-select"><option value="monthly">Monthly</option><option value="annual">Annual · 2 months free</option><option value="lifetime">Lifetime · one-off</option></select>
+                    <button class="gbtn gbtn-primary gbtn-sm" (click)="buyLicence()" [disabled]="buying">{{ buying ? 'Opening checkout…' : (buyPlan === 'lifetime' ? 'Buy lifetime →' : (meta?.tier === 'trial' ? 'Subscribe — first charge when the evaluation ends →' : 'Subscribe →')) }}</button>
                     <span *ngIf="claim?.state === 'pending'" style="font-size:12.5px;font-weight:600">⏳ Waiting for checkout to finish — the licence installs itself. <a (click)="checkClaim(true)" style="cursor:pointer;text-decoration:underline">Check now</a></span>
                     <a href="https://huloglobal.com/vendure-plugins/checkout-guard/" target="_blank" class="gbtn gbtn-outline gbtn-sm">Details ↗</a>
                 </div>
@@ -226,7 +226,7 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
             <div class="update-banner major" *ngIf="meta.tier !== 'trial'">
                 <div>
                     <strong>🔓 Free tier</strong> — session-bound order lookup, trusted client IP, rate limits, funnel events and the bank-transfer method stay active. Stripe holds, bank-transfer auto-expiry and reminders, failed-payment recording, Stripe reconciliation, the amount-drift guard and ops alerts need a licence.
-                    Start your <strong>14-day free trial</strong> below (card required, nothing charged until day 15, cancel any time) or buy a lifetime licence.
+                    Subscribe below (monthly or annual, cancel any time) or buy a lifetime licence.
                     <div class="banner-line" *ngIf="meta.premiumFeatures?.length"><strong>With a licence:</strong> {{ meta.premiumFeatures.join(' · ') }}</div>
                     <div class="banner-line" *ngIf="meta.recentStats?.length"><strong>{{ meta.eval?.source === 'server' ? 'During your evaluation:' : 'So far:' }}</strong> {{ statsLine() }}</div>
                 </div>
