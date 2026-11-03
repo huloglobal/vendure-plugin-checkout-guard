@@ -5,6 +5,28 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] — 2026-11-03
+
+### Security
+- **Rate limits and the card-testing gate could be sidestepped through the GraphQL document.**
+  A request was charged one token per limited mutation *name*, however many
+  times the document called it, so `a: applyCouponCode(…) b: applyCouponCode(…) …`
+  tried dozens of coupon codes (or payment calls) for the price of one, and a
+  batched body did the same. Every aliased call and every batched operation now
+  spends its own token; a single request with more calls than the bucket holds
+  is refused outright.
+- **Automatic Persisted Queries bypassed the limits entirely.** Apollo serves a
+  registered document from its hash alone (`{ extensions: { persistedQuery } }`,
+  no `query`), and the middleware had nothing to inspect. The middleware now
+  learns each hash from the request that registers it (the hash must match the
+  document) and charges replays like the document itself; a hash it has never
+  seen is answered with Apollo's own `PersistedQueryNotFound`, so APQ clients
+  simply resend the document. No configuration change.
+
+### Changed
+- An operation named after the field it calls (`mutation applyCouponCode { applyCouponCode(…) }`)
+  is counted once, not twice.
+
 ## [0.2.4] — 2026-10-28
 
 ### Changed

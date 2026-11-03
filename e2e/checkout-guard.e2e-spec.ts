@@ -316,6 +316,103 @@ run('@huloglobal/vendure-plugin-checkout-guard (MariaDB)', () => {
         expect(statuses.slice(3)).toContain(429);
     });
 
+    describe('rate limits cannot be sidestepped', () => {
+        const COUPON = 'applyCouponCode(couponCode: "NOPE") { ... on Order { id } ... on ErrorResult { errorCode } }';
+        let ipSeq = 10;
+        /** POSTs as a fresh client IP (via the trusted proxy header), returns status + parsed JSON. */
+        async function post(path: string, body: unknown, ip: string, extra: Record<string, string> = {}) {
+            const res = await fetch(`${BASE}${path}`, {
+                method: 'POST',
+                headers: {
+                    'content-type': 'application/json', authorization: `Bearer ${(shopClient as any).authToken}`,
+                    'x-real-client-ip': ip, 'x-checkout-guard-proxy': PROXY_SECRET, ...extra,
+                },
+                body: JSON.stringify(body),
+            });
+            let json: any = null;
+            try { json = await res.json(); } catch { /* not JSON */ }
+            return { status: res.status, json };
+        }
+        const freshIp = () => `198.51.100.${ipSeq++}`;
+        /** How many applyCouponCode resolver executions a response shows. */
+        const executed = (json: any): number => {
+            const items = Array.isArray(json) ? json : [json];
+            let n = 0;
+            for (const it of items) for (const v of Object.values(it?.data || {})) if (v) n++;
+            return n;
+        };
+
+        beforeAll(async () => { await ensureCatalogue(); await startGuestOrder('bypass.probe@example.com'); });
+
+        it('aliased copies in one document each spend a token', async () => {
+            const ip = freshIp();
+            const doc = `mutation { ${Array.from({ length: 8 }, (_, i) => `a${i}: ${COUPON}`).join(' ')} }`;
+            const r = await post('/shop-api', { query: doc }, ip);
+            expect(r.status === 429 || executed(r.json) <= 3).toBe(true);
+        });
+
+        it('a batched array spends a token per operation', async () => {
+            const ip = freshIp();
+            const body = Array.from({ length: 8 }, () => ({ query: `mutation { ${COUPON} }` }));
+            const r = await post('/shop-api', body, ip);
+            expect(r.status === 429 || executed(r.json) <= 3).toBe(true);
+        });
+
+        it.each(['/SHOP-API', '/Shop-Api', '/shop-api/', '/shop-api?x=1'])('the Shop API reached as %s is limited too', async path => {
+            const ip = freshIp();
+            const statuses: number[] = [];
+            let ran = 0;
+            for (let i = 0; i < 5; i++) {
+                const r = await post(path, { query: `mutation { ${COUPON} }` }, ip);
+                statuses.push(r.status);
+                if (r.status === 200) ran += executed(r.json);
+            }
+            expect(ran).toBeLessThanOrEqual(3);
+        });
+
+        it('an automatic persisted query (hash only, no document) is limited too', async () => {
+            const { createHash } = await import('crypto');
+            const doc = `mutation { ${COUPON} }`;
+            const sha256Hash = createHash('sha256').update(doc).digest('hex');
+            const ext = { persistedQuery: { version: 1, sha256Hash } };
+            const ip = freshIp();
+            // Register the document once, then replay by hash.
+            await post('/shop-api', { query: doc, extensions: ext }, ip);
+            let ran = 1;
+            for (let i = 0; i < 5; i++) {
+                const r = await post('/shop-api', { extensions: ext }, ip);
+                if (r.status === 200) ran += executed(r.json);
+            }
+            expect(ran).toBeLessThanOrEqual(3);
+        });
+
+        it('APQ clients keep working: an unseen hash asks for the document, then the hash alone is served', async () => {
+            const { createHash } = await import('crypto');
+            const doc = 'query { activeChannel { code } }';
+            const ext = { persistedQuery: { version: 1, sha256Hash: createHash('sha256').update(doc).digest('hex') } };
+            const ip = freshIp();
+            const first = await post('/shop-api', { extensions: ext }, ip);
+            expect(first.json?.errors?.[0]?.extensions?.code).toBe('PERSISTED_QUERY_NOT_FOUND');
+            const reg = await post('/shop-api', { query: doc, extensions: ext }, ip);
+            expect(reg.json?.data?.activeChannel?.code).toBeTruthy();
+            const replay = await post('/shop-api', { extensions: ext }, ip);
+            expect(replay.json?.data?.activeChannel?.code).toBe(reg.json.data.activeChannel.code);
+        });
+
+        it('a spoofed X-Forwarded-For does not choose the rate-limit bucket', async () => {
+            const statuses: number[] = [];
+            for (let i = 0; i < 6; i++) {
+                const res = await fetch(`${BASE}/shop-api`, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json', authorization: `Bearer ${(shopClient as any).authToken}`, 'x-forwarded-for': `203.0.113.${100 + i}` },
+                    body: JSON.stringify({ query: `mutation { ${COUPON} }` }),
+                });
+                statuses.push(res.status);
+            }
+            expect(statuses).toContain(429);
+        });
+    });
+
     // ── Observability service ──────────────────────────────────────────
     it('countRecentFailures counts declines by IP for the fraud plugin', async () => {
         await obs().recordPaymentEvent({ channelId: 1, kind: 'failed', provider: 'stripe', ip: '203.0.113.99', code: 'card_declined' } as any);

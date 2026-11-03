@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { RateLimiter } from '@huloglobal/vendure-licence-sdk';
 import { Logger } from '@vendure/core';
 import type { Middleware } from '@vendure/core';
@@ -125,6 +126,112 @@ export function extractMutationNames(body: unknown, known: Iterable<string>): st
     return found;
 }
 
+/**
+ * Blank the names of operation and fragment definitions (`mutation
+ * applyCouponCode(...)`, `fragment addPaymentToOrder on ...`) so a document
+ * named after the field it calls is counted once, not twice. Only text at
+ * brace depth 0 is touched: a field that happens to be called `query`
+ * inside a selection set is left alone.
+ */
+function blankDefinitionNames(q: string): string {
+    let out = '';
+    let seg = '';
+    let depth = 0;
+    const flush = () => {
+        out += seg.replace(/\b(query|mutation|subscription|fragment)(\s+)[_A-Za-z][_0-9A-Za-z]*/g, '$1$2');
+        seg = '';
+    };
+    for (const ch of q) {
+        if (depth === 0) {
+            if (ch === '{') { flush(); out += ch; depth++; } else seg += ch;
+        } else {
+            out += ch;
+            if (ch === '{') depth++;
+            else if (ch === '}') depth--;
+        }
+    }
+    flush();
+    return out;
+}
+
+/**
+ * How many times each configured mutation is selected in one GraphQL
+ * document. Every alias (`a: applyCouponCode(...) b: applyCouponCode(...)`)
+ * is a separate resolver call, so each one must spend a token: counting a
+ * document once let 50 aliased coupon guesses through for the price of one.
+ * Only documents with the `mutation` keyword count; comments and string
+ * literals are blanked first.
+ */
+export function countMutationCalls(query: string, known: Iterable<string>): Map<string, number> {
+    const counts = new Map<string, number>();
+    if (typeof query !== 'string') return counts;
+    const q = blankDefinitionNames(stripStringLiterals(stripGraphQlComments(query)));
+    if (!MUTATION_KEYWORD.test(q)) return counts;
+    for (const name of known) {
+        if (counts.has(name)) continue;
+        const global = new RegExp(patternFor(name).source, 'g');
+        const n = (q.match(global) || []).length;
+        if (n > 0) counts.set(name, n);
+    }
+    return counts;
+}
+
+const APQ_MAX = 10_000;
+
+/** sha256 hex of an Automatic Persisted Query document, as Apollo computes it. */
+function sha256Hex(s: string): string {
+    return createHash('sha256').update(s).digest('hex');
+}
+
+function persistedHash(item: unknown): string | null {
+    const h = (item as { extensions?: { persistedQuery?: { sha256Hash?: unknown } } } | null)?.extensions?.persistedQuery?.sha256Hash;
+    return typeof h === 'string' && /^[0-9a-f]{64}$/i.test(h) ? h.toLowerCase() : null;
+}
+
+/** Body Apollo answers for an unknown APQ hash; APQ clients then resend the full document. */
+export function persistedQueryNotFoundBody(): { errors: Array<{ message: string; extensions: { code: string } }> } {
+    return { errors: [{ message: 'PersistedQueryNotFound', extensions: { code: 'PERSISTED_QUERY_NOT_FOUND' } }] };
+}
+
+/**
+ * Mutation call counts for a whole request body (single or batched), with
+ * Automatic Persisted Queries resolved through `apq` (hash → counts, filled
+ * whenever a document arrives with its hash). `unknownHash` is true when an
+ * operation names a hash this process has never seen with its document: it
+ * cannot be inspected, so the caller must not let it through.
+ */
+export function countRequestMutationCalls(
+    body: unknown,
+    known: string[],
+    apq?: Map<string, Map<string, number>>,
+): { counts: Map<string, number>; unknownHash: boolean } {
+    const counts = new Map<string, number>();
+    let unknownHash = false;
+    if (!body || typeof body !== 'object') return { counts, unknownHash };
+    const items = Array.isArray(body) ? body : [body];
+    for (const item of items) {
+        if (!item || typeof item !== 'object') continue;
+        const query = (item as { query?: unknown }).query;
+        const hash = persistedHash(item);
+        let c: Map<string, number> | undefined;
+        if (typeof query === 'string') {
+            c = countMutationCalls(query, known);
+            if (hash && apq && sha256Hex(query) === hash) {
+                if (apq.size >= APQ_MAX && !apq.has(hash)) {
+                    const oldest = apq.keys().next().value;
+                    if (oldest !== undefined) apq.delete(oldest);
+                }
+                apq.set(hash, c);
+            }
+        } else if (hash) {
+            c = apq?.get(hash);
+            if (!c) { unknownHash = true; continue; }
+        }
+        for (const [name, n] of c || []) counts.set(name, (counts.get(name) || 0) + n);
+    }
+    return { counts, unknownHash };
+}
+
 export interface MutationRateLimitHandlerOptions {
     /** Host overrides for `DEFAULT_MUTATION_RATE_LIMITS`. */
     limits?: MutationRateLimitOverrides;
@@ -171,6 +278,9 @@ export function createMutationRateLimitHandler(opts: MutationRateLimitHandlerOpt
 
     const gateOpts = resolveCardTestingOptions(opts.cardTesting);
     const gate = gateOpts ? new CardTestingGate(gateOpts) : null;
+    const known = gate ? Array.from(new Set([...names, ...gate.opts.mutations])) : names;
+    /** APQ hash → mutation call counts, learnt from requests that carried the document. */
+    const apq = new Map<string, Map<string, number>>();
 
     const handle = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
         if ((names.length === 0 && !gate) || req.method !== 'POST') {
@@ -181,8 +291,23 @@ export function createMutationRateLimitHandler(opts: MutationRateLimitHandlerOpt
         // form field we do not parse; treat it as invoking every limited
         // mutation so it cannot be used to bypass the limits.
         const contentType = String(req.headers?.['content-type'] || '');
-        const known = gate ? Array.from(new Set([...names, ...gate.opts.mutations])) : names;
-        const invoked = /^multipart\/form-data/i.test(contentType) ? known : extractMutationNames(req.body, known);
+        let counts: Map<string, number>;
+        if (/^multipart\/form-data/i.test(contentType)) {
+            counts = new Map(known.map(n => [n, 1]));
+        } else {
+            const r = countRequestMutationCalls(req.body, known, apq);
+            if (r.unknownHash) {
+                // A persisted-query hash we never saw with its document: the
+                // operation cannot be inspected. Answer exactly as Apollo does
+                // for an unknown hash so APQ clients resend the full document.
+                res.status(200);
+                res.setHeader('Cache-Control', 'no-store');
+                res.json(persistedQueryNotFoundBody());
+                return;
+            }
+            counts = r.counts;
+        }
+        const invoked = Array.from(counts.keys());
         if (invoked.length === 0) {
             next();
             return;
@@ -195,7 +320,13 @@ export function createMutationRateLimitHandler(opts: MutationRateLimitHandlerOpt
         for (const mutation of invoked) {
             const entry = limiters.get(mutation);
             if (!entry) continue;
-            if (!entry.limiter.allow(`${mutation}|${key}`)) {
+            // One token per call: aliased copies and batched operations each pay.
+            const calls = counts.get(mutation) || 1;
+            let allowed = calls <= entry.limit.capacity;
+            for (let i = 0; allowed && i < calls; i++) {
+                allowed = entry.limiter.allow(`${mutation}|${key}`);
+            }
+            if (!allowed) {
                 bumpCounter('rate_limit');
                 onLimited({ mutation, key, limit: entry.limit });
                 res.status(429);

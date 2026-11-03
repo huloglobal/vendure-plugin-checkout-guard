@@ -115,6 +115,61 @@ describe('createMutationRateLimitHandler', () => {
         expect(limited).toEqual([{ mutation: 'applyCouponCode', key: '198.51.100.1', limit: { capacity: 3, windowMs: 60_000 } }]);
     });
 
+    it('charges one token per aliased call, so one document cannot carry many guesses', () => {
+        const handler = createMutationRateLimitHandler({ limits: { applyCouponCode: { capacity: 3, windowMs: 60_000 } }, onLimited: () => undefined, cardTesting: false });
+        const many = `mutation { ${Array.from({ length: 8 }, (_, i) => `a${i}: applyCouponCode(couponCode: "C${i}") { __typename }`).join(' ')} }`;
+        const r = drive(handler, makeReq(many, '198.51.100.40'));
+        expect(r.passed).toBe(false);
+        expect(r.res.statusCode).toBe(429);
+        // Two aliases spend two of the three tokens: one plain call still fits, a second does not.
+        const two = 'mutation { a: applyCouponCode(couponCode: "A") { __typename } b: applyCouponCode(couponCode: "B") { __typename } }';
+        expect(drive(handler, makeReq(two, '198.51.100.41')).passed).toBe(true);
+        expect(drive(handler, makeReq(COUPON, '198.51.100.41')).passed).toBe(true);
+        expect(drive(handler, makeReq(COUPON, '198.51.100.41')).passed).toBe(false);
+    });
+
+    it('charges every operation of a batched body', () => {
+        const handler = createMutationRateLimitHandler({ limits: { applyCouponCode: { capacity: 3, windowMs: 60_000 } }, onLimited: () => undefined, cardTesting: false });
+        const req = makeReq(COUPON, '198.51.100.42');
+        req.body = Array.from({ length: 4 }, () => ({ query: COUPON }));
+        expect(drive(handler, req).passed).toBe(false);
+    });
+
+    it('an operation named after the field it calls costs one token, not two', () => {
+        const handler = createMutationRateLimitHandler({ limits: { applyCouponCode: { capacity: 2, windowMs: 60_000 } }, onLimited: () => undefined, cardTesting: false });
+        const named = 'mutation applyCouponCode($c: String!) { applyCouponCode(couponCode: $c) { __typename } }';
+        expect(drive(handler, makeReq(named, '198.51.100.43')).passed).toBe(true);
+        expect(drive(handler, makeReq(named, '198.51.100.43')).passed).toBe(true);
+        expect(drive(handler, makeReq(named, '198.51.100.43')).passed).toBe(false);
+    });
+
+    it('persisted queries (hash only) are charged, and an unseen hash is never let through', () => {
+        const { createHash } = require('crypto') as typeof import('crypto');
+        const handler = createMutationRateLimitHandler({ limits: { applyCouponCode: { capacity: 2, windowMs: 60_000 } }, onLimited: () => undefined, cardTesting: false });
+        const hash = createHash('sha256').update(COUPON).digest('hex');
+        const ext = { persistedQuery: { version: 1, sha256Hash: hash } };
+        const hashOnly = () => { const r = makeReq('', '198.51.100.44'); r.body = { extensions: ext }; return r; };
+        // Unseen hash: answered like Apollo's PersistedQueryNotFound, never passed on.
+        const unseen = drive(handler, hashOnly());
+        expect(unseen.passed).toBe(false);
+        expect(unseen.res.body.errors[0].extensions.code).toBe('PERSISTED_QUERY_NOT_FOUND');
+        // Registration (document + hash) spends a token and teaches the hash.
+        const reg = makeReq(COUPON, '198.51.100.44');
+        reg.body.extensions = ext;
+        expect(drive(handler, reg).passed).toBe(true);
+        expect(drive(handler, hashOnly()).passed).toBe(true);
+        const third = drive(handler, hashOnly());
+        expect(third.passed).toBe(false);
+        expect(third.res.statusCode).toBe(429);
+        // A hash that does not match the document it came with is not learnt.
+        const lie = makeReq('mutation { setOrderCustomFields(input: {}) { __typename } }', '198.51.100.45');
+        lie.body.extensions = ext;
+        const fresh = createMutationRateLimitHandler({ limits: { applyCouponCode: { capacity: 2, windowMs: 60_000 } }, onLimited: () => undefined, cardTesting: false });
+        drive(fresh, lie);
+        const r = makeReq('', '198.51.100.45'); r.body = { extensions: ext };
+        expect(drive(fresh, r).res.body?.errors?.[0]?.extensions?.code).toBe('PERSISTED_QUERY_NOT_FOUND');
+    });
+
     it('refills over time', () => {
         const handler = createMutationRateLimitHandler({ limits: { applyCouponCode: { capacity: 2, windowMs: 60_000 } }, onLimited: () => undefined });
         drive(handler, makeReq(COUPON));

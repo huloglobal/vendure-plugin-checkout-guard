@@ -58,7 +58,10 @@ export type { ClientIpResolveOptions, ClientIpSource, ResolvedTrustedClientIpOpt
 export {
     DEFAULT_MUTATION_RATE_LIMITS,
     createMutationRateLimitHandler,
+    countMutationCalls,
+    countRequestMutationCalls,
     extractMutationNames,
+    persistedQueryNotFoundBody,
     rateLimitedBody,
     resolveMutationRateLimits,
     shopApiMutationRateLimitMiddleware,
