@@ -5,6 +5,11 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] — 2026-11-04
+
+### Documentation
+- The README now shows the plugin logo, hosted on huloglobal.com so it displays on npm and GitHub alike, linking to the product page. No code changes.
+
 ## [0.2.5] — 2026-11-03
 
 ### Security

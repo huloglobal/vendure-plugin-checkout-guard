@@ -1,6 +1,6 @@
-# @huloglobal/vendure-plugin-checkout-guard
+<p align="center"><a href="https://huloglobal.com/vendure-plugins/checkout-guard/"><img src="https://huloglobal.com/vendure-plugins/logos/checkout-guard.svg" width="96" height="96" alt="HULO Checkout Guard logo"></a></p>
 
-<p><img src="./logo.svg" width="56" height="56" alt=""></p>
+# @huloglobal/vendure-plugin-checkout-guard
 
 [![npm](https://img.shields.io/npm/v/@huloglobal/vendure-plugin-checkout-guard?label=npm)](https://www.npmjs.com/package/@huloglobal/vendure-plugin-checkout-guard) [![downloads](https://img.shields.io/npm/dm/@huloglobal/vendure-plugin-checkout-guard)](https://www.npmjs.com/package/@huloglobal/vendure-plugin-checkout-guard) ![Vendure](https://img.shields.io/badge/Vendure-3.5%20%E2%80%93%203.7-17b) ![databases](https://img.shields.io/badge/MySQL%20%7C%20MariaDB%20%7C%20PostgreSQL-ok-green) [![licence](https://img.shields.io/badge/licence-AGPL--3.0%20%2B%20commercial-blue)](https://huloglobal.com/vendure-plugins/checkout-guard/)
 
