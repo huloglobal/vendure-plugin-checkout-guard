@@ -5,6 +5,16 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.7] — 2026-11-04
+
+### Fixed
+- **PostgreSQL.** The plugin now requires licence SDK `^0.15.4`. With 0.15.3 or older on Postgres, the first weekly report was skipped (it started a week late), and the retention job logged 2 rows removed per table whatever it removed. MySQL and MariaDB were not affected.
+- **PostgreSQL: a licence key activated in the admin is now stored.** The plugin's licence store left out the conflict column that the Postgres upsert needs, so saving a key failed. Pasting a key into the admin applied it, answered with a server error and did not store it, so the plugin was unlicensed again after a restart. A key bought from the admin, which installs itself, was not stored either. MySQL and MariaDB were not affected.
+
+### Package metadata
+- `homepage` is now the product page, https://huloglobal.com/vendure-plugins/checkout-guard/, instead of the GitHub repository.
+- A shorter `description` that npm shows in full (npm cuts descriptions at 255 characters); keywords add `rate-limiting` and `card-testing`.
+
 ## [0.2.6] — 2026-11-04
 
 ### Documentation

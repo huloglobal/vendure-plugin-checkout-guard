@@ -1,10 +1,10 @@
 {
     "name": "@huloglobal/vendure-plugin-checkout-guard",
-    "version": "0.2.6",
-    "description": "The missing safety layer around Vendure checkout and payments: Stripe manual-capture holds that actually place the order, bank transfer with auto-expiry, failed-payment and orphaned-charge visibility with Stripe reconciliation, session-bound order lookup, trusted client IP, checkout rate limits and funnel events \u2014 with an admin dashboard.",
+    "version": "0.2.7",
+    "description": "The safety layer around Vendure checkout: Stripe manual-capture holds that place the order, bank transfer with expiry, failed and orphaned payment tracking with Stripe reconciliation, session-bound order lookup, checkout rate limits and funnel tracking.",
     "license": "AGPL-3.0-or-later",
     "author": "Wayne Garrison <wayne@garrison.me.uk>",
-    "homepage": "https://github.com/huloglobal/vendure-plugin-checkout-guard",
+    "homepage": "https://huloglobal.com/vendure-plugins/checkout-guard/",
     "repository": {
         "type": "git",
         "url": "git+https://github.com/huloglobal/vendure-plugin-checkout-guard.git"
@@ -29,7 +29,7 @@
         "test:watch": "vitest"
     },
     "dependencies": {
-        "@huloglobal/vendure-licence-sdk": "^0.15.1"
+        "@huloglobal/vendure-licence-sdk": "^0.15.4"
     },
     "peerDependencies": {
         "@nestjs/common": ">=10.0.0",
@@ -59,6 +59,8 @@
         "stripe",
         "bank-transfer",
         "manual-capture",
-        "reconciliation"
+        "reconciliation",
+        "rate-limiting",
+        "card-testing"
     ]
 }

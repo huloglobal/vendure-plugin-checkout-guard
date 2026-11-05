@@ -196,7 +196,7 @@ export class CheckoutGuardPlugin {
         CheckoutGuardPlugin.wireRuntimes(this.moduleRef);
         if (!CheckoutGuardPlugin.licenceStatus?.valid) {
             try {
-                const store = new LicenceStore((sql, params) => adapterFor(this.connection.rawConnection).query(sql, params));
+                const store = new LicenceStore((sql, params, opts) => adapterFor(this.connection.rawConnection).query(sql, params, opts));
                 await store.ensureTable();
                 const stored = await store.load(PLUGIN_ID);
                 if (stored) {

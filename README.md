@@ -1,4 +1,4 @@
-<p align="center"><a href="https://huloglobal.com/vendure-plugins/checkout-guard/"><img src="https://huloglobal.com/vendure-plugins/logos/checkout-guard.svg" width="96" height="96" alt="HULO Checkout Guard logo"></a></p>
+<p align="center"><a href="https://huloglobal.com/vendure-plugins/checkout-guard/"><img src="https://huloglobal.com/vendure-plugins/logos/checkout-guard.svg?v=2" width="96" height="96" alt="HULO Checkout Guard logo"></a></p>
 
 # @huloglobal/vendure-plugin-checkout-guard
 
