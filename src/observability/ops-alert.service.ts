@@ -3,8 +3,15 @@ import { Logger } from '@vendure/core';
 import { fanOutOpsEvent, OpsChannels, OpsEvent } from '../ops-notify';
 import { hasPremium, loggerCtx, noteLocked, runtimeOptions } from './runtime';
 
-/** Events delivered even on the free tier: the operator must hear that holds are not being recorded. */
-const ALWAYS_ALERT = new Set(['hold.webhook_error', 'webhook.error']);
+/**
+ * Events delivered even on the free tier: the operator must hear that holds
+ * are not being recorded, and Stripe bank transfers (a free-tier feature)
+ * report money that is at Stripe without a settled order.
+ */
+const ALWAYS_ALERT = new Set([
+    'hold.webhook_error', 'webhook.error',
+    'bank.stripe_fallback', 'bank.stripe_cancel_failed', 'bank.stripe_unsettled', 'bank.stripe_partially_funded', 'bank.stripe_check_failed',
+]);
 
 type SmtpSettings = { host: string; port: number; user: string; pass: string; from: string };
 

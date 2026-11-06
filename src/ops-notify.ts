@@ -41,6 +41,11 @@ export type CheckoutGuardOpsEventName =
     | 'hold.expired'
     | 'bank.expired'
     | 'bank.reminder'
+    | 'bank.stripe_fallback'
+    | 'bank.stripe_cancel_failed'
+    | 'bank.stripe_unsettled'
+    | 'bank.stripe_partially_funded'
+    | 'bank.stripe_check_failed'
     | 'webhook.error'
     | 'reconciliation.summary';
 

@@ -29,7 +29,10 @@ export class StripeRequestError extends Error {
     get type(): string | undefined { return this.error?.type; }
 }
 
-export type FetchLike = (url: string, init: any) => Promise<{ ok: boolean; status: number; json(): Promise<any>; text(): Promise<string> }>;
+export type FetchLike = (url: string, init: any) => Promise<{
+    ok: boolean; status: number; json(): Promise<any>; text(): Promise<string>;
+    headers?: { get(name: string): string | null } | null;
+}>;
 
 export interface StripeRequestOptions {
     idempotencyKey?: string;
@@ -37,6 +40,9 @@ export interface StripeRequestOptions {
     fetchImpl?: FetchLike;
     apiVersion?: string;
     baseUrl?: string;
+    /** Called once Stripe has answered (before the body is checked). `replayed` is Stripe's
+     *  `Idempotent-Replayed: true` header: the saved answer to an earlier request with the same key. */
+    onResponse?: (info: { status: number; replayed: boolean }) => void;
 }
 
 export function encodeForm(params: Record<string, unknown>, prefix = ''): string {
@@ -87,6 +93,11 @@ export async function stripeRequest<T = any>(
     const timer = ac ? setTimeout(() => ac.abort(), opts.timeoutMs ?? 15_000) : undefined;
     try {
         const res = await fetchImpl(url, { method, headers, body, signal: ac?.signal });
+        if (opts.onResponse) {
+            let replayed = false;
+            try { replayed = String(res.headers?.get?.('idempotent-replayed') ?? '').toLowerCase() === 'true'; } catch { /* no headers */ }
+            opts.onResponse({ status: res.status, replayed });
+        }
         let payload: any = null;
         try { payload = await res.json(); } catch { payload = null; }
         if (!res.ok) {

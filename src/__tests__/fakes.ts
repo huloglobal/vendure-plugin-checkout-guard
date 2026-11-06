@@ -102,8 +102,8 @@ export class FakeConnection {
 
 export function fakeOrderService(conn?: FakeConnection) {
     const svc = {
-        findOneByCode: vi.fn(async () => null as any),
-        findOne: vi.fn(async () => null as any),
+        findOneByCode: vi.fn(async (_ctx?: any, _code?: any, _relations?: any) => null as any),
+        findOne: vi.fn(async (_ctx?: any, _id?: any, _relations?: any) => null as any),
         transitionToState: vi.fn(async () => ({ state: 'ArrangingPayment' } as any)),
         addPaymentToOrder: vi.fn(async () => null as any),
         settlePayment: vi.fn(async (_ctx: any, paymentId: any) => { conn?.log.push(`settle:${paymentId}`); return { id: paymentId, state: 'Settled' } as any; }),
@@ -140,4 +140,96 @@ export function errorResult(message: string, errorCode = 'ERROR', extra: Row = {
 
 export async function flushAsync(): Promise<void> {
     await new Promise(r => setTimeout(r, 5));
+}
+
+/** One request the code under test sent to the fake Stripe API, decoded. */
+export interface StripeCall {
+    method: string;
+    /** e.g. `/v1/payment_intents` */
+    path: string;
+    query: Record<string, string>;
+    /** The form body decoded (`payment_method_types[0]` → `customer_balance`). */
+    form: Record<string, string>;
+    headers: Record<string, string>;
+    /** The raw form body, exactly as sent. */
+    body: string;
+}
+
+/** A reply: a status, JSON body and response headers, or `'hang'` (never answers until the request is aborted). */
+export type StripeReply = { status?: number; body?: any; headers?: Record<string, string> } | 'hang';
+
+/**
+ * Stubs the global `fetch` with a fake api.stripe.com. Nothing leaves the
+ * process: every request is recorded in `calls` and answered by `respond`,
+ * which tests replace per case. Undo with `vi.unstubAllGlobals()`.
+ */
+export function installFakeStripe(respond: (call: StripeCall) => StripeReply | Promise<StripeReply> = () => ({ status: 404, body: { error: { message: 'no route' } } })) {
+    const calls: StripeCall[] = [];
+    const state = { respond };
+    const fetchMock = vi.fn((url: string, init: any = {}) => {
+        const u = new URL(url);
+        const call: StripeCall = {
+            method: init.method || 'GET',
+            path: u.pathname,
+            query: Object.fromEntries(u.searchParams),
+            form: Object.fromEntries(new URLSearchParams(init.body || '')),
+            headers: { ...(init.headers || {}) },
+            body: init.body || '',
+        };
+        calls.push(call);
+        return Promise.resolve(state.respond(call)).then(reply => {
+            if (reply === 'hang') {
+                return new Promise((_resolve, reject) => {
+                    const abort = () => { const e = new Error('This operation was aborted'); e.name = 'AbortError'; reject(e); };
+                    if (init.signal?.aborted) abort(); else init.signal?.addEventListener('abort', abort);
+                });
+            }
+            const status = reply.status ?? 200;
+            const headers = Object.fromEntries(Object.entries(reply.headers || {}).map(([k, v]) => [k.toLowerCase(), v]));
+            return {
+                ok: status >= 200 && status < 300, status, json: async () => reply.body, text: async () => JSON.stringify(reply.body),
+                headers: { get: (name: string) => headers[name.toLowerCase()] ?? null },
+            };
+        });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return {
+        calls,
+        fetch: fetchMock,
+        respond(fn: (call: StripeCall) => StripeReply | Promise<StripeReply>) { state.respond = fn; },
+        /** Calls whose `METHOD /path` matches. */
+        to(re: RegExp): StripeCall[] { return calls.filter(c => re.test(`${c.method} ${c.path}`)); },
+    };
+}
+
+/** A confirmed `customer_balance` PaymentIntent awaiting a UK bank transfer, as Stripe returns it. */
+export function stripeBankTransferIntent(over: Record<string, any> = {}): any {
+    const { instructions = {}, ...rest } = over;
+    return {
+        id: 'pi_bt123',
+        object: 'payment_intent',
+        status: 'requires_action',
+        amount: 12999,
+        amount_received: 0,
+        currency: 'gbp',
+        customer: 'cus_123',
+        metadata: { cg_bank_transfer: '1', cg_order_code: 'ORD1', cg_order_id: '10', cg_channel_id: '2' },
+        next_action: {
+            type: 'display_bank_transfer_instructions',
+            display_bank_transfer_instructions: {
+                type: 'gb_bank_transfer',
+                reference: 'RF7K2M9Q4XWZ',
+                amount_remaining: 12999,
+                currency: 'gbp',
+                hosted_instructions_url: 'https://payments.stripe.com/bank_transfers/instructions/test_abc',
+                financial_addresses: [{
+                    type: 'sort_code',
+                    supported_networks: ['bacs', 'fps'],
+                    sort_code: { account_holder_name: 'HULO GLOBAL LIMITED', account_number: '98765432', sort_code: '200000' },
+                }],
+                ...instructions,
+            },
+        },
+        ...rest,
+    };
 }

@@ -129,6 +129,14 @@ export class StripeHoldService {
             return { status: 200, message: 'Event has no Vendure metadata, skipped' };
         }
         if (!this.premium()) {
+            // With Stripe bank transfers on, the endpoint also receives events
+            // for ordinary card payments. None of them is a hold to record (and
+            // the failed-payment log is premium), so they are acknowledged
+            // rather than retried for days, which could get the endpoint disabled.
+            if (pi.capture_method !== 'manual' && getStripeHoldRuntime().acknowledgeNonHoldEventsWhileLocked?.()) {
+                Logger.verbose(`Stripe event ${type} for ${pi.id} is not a hold; acknowledged while premium is locked`, loggerCtx);
+                return { status: 200, message: `Event ${type} is not for a hold; ignored while Checkout Guard premium is locked` };
+            }
             // Not 200: Stripe keeps retrying (with back-off, for days) so the
             // hold is attached as soon as a licence is active again.
             const now = Date.now();

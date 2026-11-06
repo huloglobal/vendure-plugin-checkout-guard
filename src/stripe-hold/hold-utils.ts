@@ -50,6 +50,25 @@ export function resolveWebhookSecret(
     return o || undefined;
 }
 
+/**
+ * Every webhook signing secret configured: the plugin option first, then each
+ * `STRIPE_CG_WEBHOOK_SECRET_<CHANNELCODE>` env value, without duplicates. Used
+ * only when an event cannot be verified with the secret its channel selects
+ * (one URL serving endpoints on several Stripe accounts).
+ */
+export function allWebhookSecrets(optionSecret: string | undefined, env: NodeJS.ProcessEnv = process.env): string[] {
+    const out: string[] = [];
+    const add = (v: unknown) => {
+        const s = typeof v === 'string' ? v.trim() : '';
+        if (s && !out.includes(s)) out.push(s);
+    };
+    add(optionSecret);
+    for (const name of Object.keys(env).sort()) {
+        if (/^STRIPE_CG_WEBHOOK_SECRET_[A-Z0-9_]+$/.test(name)) add(env[name]);
+    }
+    return out;
+}
+
 let fractionCache: Record<string, boolean> = {};
 /** Stripe zero-decimal currency detection, same approach as the Vendure
  *  Stripe plugin (Intl formatToParts). */

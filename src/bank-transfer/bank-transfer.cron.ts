@@ -35,4 +35,24 @@ export class BankTransferCrons {
             Logger.error(`Bank transfer sweep failed: ${e.message}`, loggerCtx);
         }
     }
+
+    /**
+     * Stripe bank transfers (`bankTransfer.stripe`, worker only): settles any
+     * transfer whose PaymentIntent Stripe reports as paid, in case the webhook
+     * was missed. A no-op while the mode is off. At 5, 15 … 55 minutes past the
+     * hour, and a run starts no new check after three minutes, so it never
+     * holds their shared lock when the six-hourly sweep starts.
+     */
+    @Cron('0 5-59/10 * * * *')
+    async syncStripeBankTransfers() {
+        if (this.processContext.isServer) return; // worker only
+        try {
+            const r = await this.service.syncStripe();
+            if (r.settled > 0) {
+                Logger.info(`Stripe bank transfers: ${r.settled} settled from Stripe (${r.checked} checked, ${r.awaiting} still awaiting funds)`, loggerCtx);
+            }
+        } catch (e: any) {
+            Logger.error(`Stripe bank-transfer check failed: ${e?.message || e}`, loggerCtx);
+        }
+    }
 }

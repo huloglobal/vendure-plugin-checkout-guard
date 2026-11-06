@@ -13,7 +13,42 @@ export type {
     BankTransferListStatus,
     BankTransferRow,
     BankTransferSweepResult,
+    StripeBankTransferSyncResult,
 } from './bank-transfer.service';
+export {
+    STRIPE_BANK_TRANSFER_CUSTOMER_METADATA,
+    STRIPE_BANK_TRANSFER_METADATA,
+    STRIPE_BANK_TRANSFER_TIMEOUT_MS,
+    STRIPE_BANK_TRANSFER_TYPES,
+    StripeBankTransferError,
+    bankTransferCustomerIdempotencyKey,
+    bankTransferIdempotencyKey,
+    buildBankTransferPaymentIntentParams,
+    cancelStripeBankTransfer,
+    createStripeBankTransfer,
+    findStrayBankTransferIntents,
+    formatSortCode,
+    mapStripeBankTransferInstructions,
+    normaliseStripeBankTransferOptions,
+    parseBankTransferStripeMetadata,
+    retrieveCustomerCashBalance,
+    settledThroughStripe,
+    stripeChannelIdOf,
+    stripeCustomerIdOf,
+    stripePaymentIntentIdOf,
+    stripeTransferFunding,
+} from './stripe-bank-transfer';
+export type {
+    StrayBankTransferIntent,
+    StripeBankTransferCancelOutcome,
+    StripeBankTransferFailureReason,
+    StripeBankTransferInput,
+    StripeBankTransferIntentLike,
+    StripeBankTransferOptions,
+    StripeBankTransferOutcome,
+    StripeBankTransferSettings,
+    StripeBankTransferType,
+} from './stripe-bank-transfer';
 export { BankTransferCrons } from './bank-transfer.cron';
 export { BankTransferController } from './bank-transfer.controller';
 export {
@@ -29,8 +64,9 @@ export {
     DEFAULT_BANK_TRANSFER_EXPIRY_DAYS,
     DEFAULT_BANK_TRANSFER_REMINDER_AFTER_DAYS,
     getBankTransferRuntime,
+    notifyBankTransferOps,
     setBankTransferRuntime,
 } from './bank-transfer-runtime';
-export type { BankTransferRuntime } from './bank-transfer-runtime';
+export type { BankTransferOpsEvent, BankTransferOpsEventName, BankTransferRuntime } from './bank-transfer-runtime';
 export { addDays, classifyBankTransfer, daysUntil } from './expiry-policy';
 export type { BankTransferSweepDecision, BankTransferSweepInput } from './expiry-policy';

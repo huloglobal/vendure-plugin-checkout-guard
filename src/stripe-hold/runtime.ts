@@ -81,6 +81,14 @@ export interface StripeHoldRuntime {
     notifyOps(ev: StripeHoldOpsEvent): Promise<void>;
     /** Persist a payment event (module D). Must never throw. */
     recordPaymentEvent(ev: StripeHoldPaymentEvent): Promise<void>;
+    /**
+     * While premium is locked, answer 200 (instead of 503) for webhook events
+     * about PaymentIntents that are not holds (any `capture_method` other than
+     * `manual`). The plugin turns this on with Stripe bank transfers: their
+     * endpoint also receives `payment_intent.succeeded` for every card payment,
+     * and days of 503s could get it disabled. Off by default (0.2.9 behaviour).
+     */
+    acknowledgeNonHoldEventsWhileLocked?(): boolean;
 }
 
 export const STRIPE_HOLD_DEFAULTS = Object.freeze({
@@ -93,6 +101,7 @@ const noopRuntime: StripeHoldRuntime = {
     hasPremiumAccess: () => false,
     notifyOps: async () => undefined,
     recordPaymentEvent: async () => undefined,
+    acknowledgeNonHoldEventsWhileLocked: () => false,
 };
 
 let runtime: StripeHoldRuntime = noopRuntime;

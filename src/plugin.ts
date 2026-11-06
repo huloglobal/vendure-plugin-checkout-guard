@@ -13,7 +13,7 @@ import {
 } from './stripe-hold';
 import {
     bankTransferPaymentHandler, bankTransferEligibilityChecker, BankTransferController, BankTransferService,
-    BankTransferCrons, setBankTransferRuntime,
+    BankTransferCrons, setBankTransferRuntime, getBankTransferRuntime, normaliseStripeBankTransferOptions, StripeBankTransferOptions,
 } from './bank-transfer';
 import {
     registerCheckoutGuardCustomFields, trustedClientIpMiddleware, shopApiMutationRateLimitMiddleware,
@@ -39,8 +39,10 @@ export interface CheckoutGuardPluginOptions {
     /** Stripe hold handling. `webhookSecret` signs `/checkout-guard/stripe-webhook`;
      *  a per-channel `STRIPE_CG_WEBHOOK_SECRET_<CHANNELCODE>` env var overrides it. */
     stripe?: StripeHoldOptions & { webhookSecret?: string };
-    /** Bank transfer expiry (default 7 days) and reminder (default 3 days). */
-    bankTransfer?: { expiryDays?: number; reminderAfterDays?: number };
+    /** Bank transfer expiry (default 7 days) and reminder (default 3 days). `stripe: { enabled: true }`
+     *  (opt-in) gives GBP orders the customer's Stripe virtual account and reference instead of the
+     *  payment method's own details, and settles them when Stripe receives the money. See the README. */
+    bankTransfer?: { expiryDays?: number; reminderAfterDays?: number; stripe?: StripeBankTransferOptions };
     /** Nightly Stripe ↔ Vendure reconciliation (premium). */
     reconciliation?: { enabled?: boolean; lookbackDays?: number };
     /** Trusted client-IP contract for server-side proxies. */
@@ -251,11 +253,15 @@ export class CheckoutGuardPlugin {
             hasPremiumAccess: premium,
             notifyOps: async ev => { if (ops) void ops.alert(ev as any); },
             recordPaymentEvent: async ev => { if (events) await events.recordPaymentEvent(ev as any); },
+            // Stripe bank transfers share the hold webhook and need payment_intent.succeeded on it.
+            acknowledgeNonHoldEventsWhileLocked: () => !!getBankTransferRuntime().stripe,
         });
         setBankTransferRuntime({
             expiryDays: options.bankTransfer?.expiryDays,
             reminderAfterDays: options.bankTransfer?.reminderAfterDays,
             hasPremiumAccess: premium,
+            stripe: normaliseStripeBankTransferOptions(options.bankTransfer?.stripe),
+            notifyOps: async ev => { if (ops) void ops.alert(ev); },
         });
         configureObservability({ getOptions: () => options, hasPremiumAccess: premium });
     }

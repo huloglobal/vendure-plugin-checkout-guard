@@ -31,7 +31,7 @@ yarn add @huloglobal/vendure-plugin-checkout-guard   # or npm install / pnpm add
 | Module | What you get |
 |---|---|
 | **Stripe holds** | `stripe-hold` payment handler + signed webhook for `payment_intent.amount_capturable_updated` → an *Authorized* payment, order placed as `PaymentAuthorized`. Capture / cancel from the admin, safety capture before Stripe's 7-day window, `payment_failed` recorded. |
-| **Bank transfer** | `bank-transfer` handler with the account details in the payment's **public metadata** (storefronts render them), eligibility checker (min / max, guests, customer groups), auto-expiry after N days, reminder event, admin *received* / *cancel*. |
+| **Bank transfer** | `bank-transfer` handler with the account details in the payment's **public metadata** (storefronts render them), eligibility checker (min / max, guests, customer groups), auto-expiry after N days, reminder event, admin *received* / *cancel*. Optional **Stripe bank transfers**: each customer pays into their own Stripe virtual account and the order settles by itself when the money arrives. |
 | **Guards** | Session-bound anonymous `orderByCode`; trusted client-IP contract for server-side proxies; token-bucket rate limits on checkout mutations. |
 | **Observability** | Payment-event log (failed, client-declined, orphan, amount drift, expired), nightly Stripe reconciliation per channel, amount-drift guard, checkout funnel events with drop-off, ops alerts (Slack / Discord / Teams / Telegram / signed webhook / email). |
 | **Admin dashboard** | *Sales → Checkout Guard*: Overview (set-up checklist, KPIs, value metrics), Holds, Bank transfers, Payment events, Funnel, Settings (weekly report), Licence & billing. Plus a dashboard widget. |
@@ -128,6 +128,216 @@ the confirmation page while the order is `PaymentAuthorized`. Unpaid orders
 expire after `expiryDays` (cancelled, `BankTransferExpiredEvent`); a
 `BankTransferReminderEvent` fires once after `reminderAfterDays` — subscribe
 to both to email the customer. Mark money received from the dashboard.
+
+### Stripe bank transfers
+
+Off by default. Turn it on and every bank-transfer order in GBP goes through
+Stripe instead of your own account: Stripe gives the customer a virtual UK
+account (sort code and account number) and a reference, matches the incoming
+Faster Payment or BACS credit to the order, and the plugin settles the
+payment, so the order moves to `PaymentSettled` and your fulfilment runs
+without anyone matching payments by hand.
+
+```ts
+CheckoutGuardPlugin.init({
+    // …
+    bankTransfer: {
+        expiryDays: 7,
+        reminderAfterDays: 3,
+        stripe: { enabled: true },   // currencies: ['GBP'] by default
+    },
+});
+```
+
+**Set-up**
+
+1. **Bank transfers on the Stripe account, and only for this plugin.** In the
+   Stripe dashboard turn on *Bank transfers* (the customer balance payment
+   method) for GBP. That switch also offers bank transfer in every payment
+   that uses Stripe's dynamic payment methods, which is what Vendure's
+   `StripePlugin` creates for card checkout: signed-in customers would be
+   offered a Stripe bank transfer inside the card form, outside Checkout
+   Guard (no expiry, no reminders, Stripe's own instructions). Keep it out of
+   the card flow:
+
+   ```ts
+   StripePlugin.init({
+       // …
+       skipPaymentIntentsWithoutExpectedMetadata: true,   // see step 4
+       paymentIntentCreateParams: () => ({ excluded_payment_method_types: ['customer_balance'] }),
+   });
+   ```
+
+   (merge it into the object your `paymentIntentCreateParams` already
+   returns, or point `payment_method_configuration` at a payment method
+   configuration without bank transfers). Check in test mode that the card
+   form no longer offers bank transfer, and that a bank-transfer order still
+   gets its Stripe account.
+2. **The Stripe secret key** is read from the channel's Vendure Stripe payment
+   method (handler `stripe`, argument `apiKey`), as for holds. Vendure also
+   assigns every new payment method to the default channel, so the default
+   channel can see another channel's Stripe method (another Stripe account).
+   For bank transfers the plugin prefers the Stripe method that belongs to the
+   channel alone, and logs its choice once per channel (`Stripe bank transfers
+   on channel 1 use the Stripe payment method "stripe"`): check that line
+   before going live. A channel without a key keeps your own bank details.
+3. **Webhook.** On every Stripe endpoint that targets
+   `https://<api>/checkout-guard/stripe-webhook` (one per Stripe account), add
+   `payment_intent.succeeded` (this settles the order),
+   `payment_intent.partially_funded` (the amount still due is updated) and
+   `customer_cash_balance_transaction.created` (money that paid no order is
+   reported); `payment_intent.canceled` is already on the list for holds. The
+   signing secrets are the ones used for holds: `stripe.webhookSecret`, or per
+   channel `STRIPE_CG_WEBHOOK_SECRET_<CHANNELCODE>` (the channel comes from the
+   intent's `cg_channel_id` metadata). One URL usually serves endpoints on
+   several Stripe accounts, and they also deliver events for payments that are
+   not Vendure's. So in this mode an event the channel's secret cannot verify
+   is checked against the other configured secrets: an event without Vendure
+   metadata is then acknowledged as before, and one that names a channel but
+   is signed for another account's endpoint is acknowledged and never acted
+   on. Likewise, while premium is locked the hold module answers 200 (not
+   503) for events about payments that are not holds, so days of retries
+   cannot get the shared endpoint disabled.
+4. **Vendure's StripePlugin must skip these intents.** They carry only
+   Checkout Guard's metadata (`cg_bank_transfer`, `cg_order_code`,
+   `cg_order_id`, `cg_channel_id`), never `channelToken` / `orderCode` /
+   `orderId`, so Vendure's own Stripe webhook throws on them and Stripe keeps
+   retrying it for days. Set
+   `StripePlugin.init({ skipPaymentIntentsWithoutExpectedMetadata: true })`
+   before you enable this.
+5. **Copy.** The reference is now Stripe's, not the order code. Any storefront,
+   e-mail or invoice text that says "quote your order number", or shows your
+   own account for a bank-transfer order, must show `metadata.public`
+   (`sortCode`, `accountNumber`, `reference`) instead; money sent to your own
+   account has to be marked received by hand.
+
+**What the customer sees.** `metadata.public` keeps its field names, so
+storefronts and e-mails that render the static details render these too:
+`{ method: 'bank-transfer', provider: 'stripe', accountName, sortCode
+('12-34-56'), accountNumber, reference (Stripe's), amountMinor (what is still
+to pay), currency, payBy, expiryDays, instructions, hostedInstructionsUrl }`.
+There is no `iban` / `bic`: your own account's are never shown next to
+Stripe's. The default instructions ask the customer to send the exact amount
+and quote the reference, and say that Faster Payments usually arrive within
+hours and BACS can take up to three working days; replace them with
+`stripe.instructions` (`{reference}` is filled in). Once part of the money has
+arrived, `amountMinor` is lowered to what is still due, so the confirmation
+page and the reminder e-mail ask only for the rest. The PaymentIntent id, the
+Stripe customer and the channel are kept in the payment's admin-only metadata
+(`paymentIntentId`, `stripeCustomerId`, `stripeChannelId`). The payment's
+`transactionId` stays the order code.
+
+**Whose Stripe customer.** Stripe applies a customer's whole cash balance to a
+new PaymentIntent the moment it is confirmed, so the Stripe customer must
+really be the shopper's:
+
+- **Signed in as the order's customer** (a registered account): the Stripe
+  customer the plugin created for that Vendure customer and user is reused
+  (found by e-mail, then checked by its `cg_vendure_customer_id` and
+  `cg_vendure_user_id` metadata), so a returning customer pays into the same
+  account every time, and their own balance (an earlier overpayment, say) pays
+  for the order: in full, and the payment is recorded as *Settled*, or in
+  part, and the instructions ask for the rest.
+- **Anyone else** (guest checkout): a new Stripe customer for that order alone
+  (metadata `cg_order_code`), with its own virtual account and no balance.
+  Typing someone's e-mail address at checkout never reaches their Stripe
+  customer or their money. A Stripe customer with the same e-mail that someone
+  else created (Vendure's `StripePlugin`, another integration) is never used.
+
+**How it settles.** The plugin creates and confirms a `customer_balance`
+PaymentIntent with funding type `bank_transfer` (idempotency key from the order
+code and amount) and records the payment as *Authorized*, so the order is placed
+as before. Then:
+
+- `payment_intent.succeeded` → the order's Authorized bank-transfer payment for
+  that intent is settled under a row lock, in the order's own channel, and its
+  tracking row is marked settled, exactly like *Mark received*. Redeliveries are
+  harmless. Nothing is settled (and `bank.stripe_unsettled` is raised, since the
+  money is at Stripe) when the order is cancelled or already paid some other
+  way, or Stripe received less than the payment.
+- A **sweep** on the worker (every ten minutes, at 5, 15 … 55 past the hour,
+  under the same lock as the expiry sweep) asks Stripe about each open
+  Stripe transfer of an order still awaiting payment, newest first and at most
+  once per ten minutes per payment, and settles those that have succeeded, in
+  case a webhook was missed. It starts no new check after three minutes, so it
+  never holds the lock into the next expiry sweep.
+- A **part-paid** transfer stays open: the log shows what was received and the
+  `amount_remaining`, and the customer can send the rest.
+- Before the expiry sweep expires a Stripe transfer it asks Stripe first. Paid:
+  the order is settled instead. Stripe unreachable: it is not expired on that
+  pass, and once it is a day past its pay-by date `bank.stripe_check_failed`
+  asks you to look. Stripe saying the intent is not on that account (a changed
+  key): it is expired as usual.
+
+**Settling by hand.** *Mark received*, or Vendure's *Settle payment*, still
+works, for a customer who paid your own account anyway. If Stripe has the money
+after all, it counts as Stripe's settlement. Otherwise the plugin cancels the
+PaymentIntent, so a later transfer to the customer's virtual account cannot be
+matched to this already paid order without anyone noticing; a part payment
+that had already arrived through Stripe raises `bank.stripe_partially_funded`.
+If Stripe later reports a transfer for a payment settled by hand,
+`bank.stripe_unsettled` warns that the customer may have paid twice.
+
+**Cancelling.** When an unpaid transfer expires, its payment is cancelled
+(from *Checkout Guard → Bank transfers* or Vendure's *Cancel payment*), or its
+order is cancelled in Vendure (*Cancel order* leaves payments alone, so the
+plugin cancels the open Stripe transfer of a cancelled order itself), the
+plugin cancels the PaymentIntent at Stripe, best effort. A transfer Stripe says
+is already paid is not cancelled; settle it instead (for an order that is
+already cancelled, `bank.stripe_unsettled` asks you to refund or reinstate it).
+If the cancel fails, the Vendure payment is still cancelled and
+`bank.stripe_cancel_failed` asks you to cancel the intent in the Stripe
+dashboard. **Money that arrives after the intent is cancelled, and any
+part-payment it was holding, stays in the customer's Stripe cash balance.** A
+cancelled part-paid transfer raises `bank.stripe_partially_funded` with the
+amount, and money left in the cash balance of a customer the plugin created
+(a late transfer, an overpayment) raises `bank.stripe_unsettled`, once per
+amount. Refund it from the Stripe dashboard (*Customers → the customer → Cash
+balance → Initiate refund*). Left there, it is applied to that customer's next
+bank-transfer order (Stripe's default automatic reconciliation), and Stripe
+itself tries to return balances that stay unreconciled for 75 days. Refunds of
+settled Stripe transfers are made from the Stripe dashboard too.
+
+**Never breaks checkout.** If Stripe cannot be used for an order (no key on the
+channel, an API error, no answer within 15 seconds, Stripe refusing the
+currency, a reply without transfer instructions, or Stripe applying a cash
+balance to a guest's order) the order gets the payment method's own details
+exactly as before, a warning is logged and `bank.stripe_fallback` is raised;
+that order is settled by hand. When the PaymentIntent request itself got no
+answer, Stripe may have created the intent anyway: 30 seconds and again 5
+minutes later the plugin lists that customer's intents for the order and
+cancels any that no payment carries (one already paid raises
+`bank.stripe_unsettled`).
+
+**Submitted twice.** Two `addPaymentToOrder` calls for one checkout (a double
+click) would otherwise race, and Stripe answers the second with the first one's
+PaymentIntent. In this mode the handler locks the order row before it calls
+Stripe; the request that comes second sees the order already placed and gets an
+`Error` payment (`PaymentFailedError` in the Shop API) instead of a second
+payment for the same PaymentIntent. Should two payments carry one
+intent all the same, only one is ever settled, and `bank.stripe_unsettled`
+names the duplicate to cancel; cancelling it leaves the PaymentIntent alone.
+
+**Time and locks.** The Stripe calls (normally two, never more than 15
+seconds in all) run inside Vendure's `addPaymentToOrder` transaction, like any
+payment handler's. During that time the order row is locked, and when the order
+has coupon codes, Vendure's own lock on those promotions makes other checkouts
+with the same coupon wait for at most that long, well inside MySQL's 50-second
+lock wait.
+
+**Alerts.** `bank.stripe_fallback`, `bank.stripe_cancel_failed`,
+`bank.stripe_unsettled`, `bank.stripe_partially_funded` and
+`bank.stripe_check_failed` reach your `ops` channels on every tier: Stripe bank
+transfers are a free-tier feature, and each of these means money or a customer
+that needs a human.
+
+**Currencies.** `currencies` defaults to `['GBP']` (`gb_bank_transfer`). `EUR`
+(`eu_bank_transfer`, an IBAN and BIC instead of a sort code) works when the
+Stripe account accepts EUR bank transfers and `euCountry` is set (`BE`, `DE`,
+`FR`, `IE` or `NL`; Stripe currently issues no new Spanish IBANs). Orders in any
+other currency keep your own details. Stripe bank transfers work on every
+tier: settling a paid order never waits on a licence. Automatic expiry and
+reminders stay premium.
 
 ## Guards
 
@@ -291,7 +501,8 @@ live under `/checkout-guard`; see [Endpoints](#endpoints).
 ## Tiers
 
 **Free:** session-bound order lookup, trusted client IP, rate limits, funnel
-events, the bank-transfer handler and checker, the dashboard.
+events, the bank-transfer handler and checker (including Stripe bank transfers,
+their automatic settlement and their `bank.stripe_*` alerts), the dashboard.
 **Licensed (or the 14-day card-backed trial):** Stripe hold handling, bank-transfer
 auto-expiry and reminders, failed-payment recording, reconciliation, the
 amount-drift guard and ops alerts. Start the trial or buy from the admin

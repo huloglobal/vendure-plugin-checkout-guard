@@ -12,14 +12,19 @@ export const BANK_TRANSFER_HANDLER_CODE = 'bank-transfer';
 export interface BankTransferPublicDetails {
     /** Constant marker so storefronts can branch without inspecting the method code. */
     method: 'bank-transfer';
+    /** `'stripe'` when the account is the customer's Stripe virtual account
+     *  (`bankTransfer.stripe`); absent for the payment method's own details. */
+    provider?: 'stripe';
     accountName?: string;
     accountNumber?: string;
+    /** Formatted `12-34-56` for Stripe accounts; as entered for the payment method's own details. */
     sortCode?: string;
     iban?: string;
     bic?: string;
-    /** The order code — what the customer must quote as the payment reference. */
+    /** What the customer must quote as the payment reference: the order code,
+     *  or Stripe's reference when `provider` is `'stripe'`. */
     reference: string;
-    /** Amount due in minor units (pence / cents). */
+    /** Amount due in minor units (pence / cents). For Stripe, what is still to pay. */
     amountMinor: number;
     /** ISO 4217 code, e.g. GBP. */
     currency: string;
@@ -28,6 +33,8 @@ export interface BankTransferPublicDetails {
     /** Number of days the customer was given, for display ("pay within 7 days"). */
     expiryDays: number;
     instructions?: string;
+    /** Stripe's hosted page with the same instructions (Stripe accounts only). */
+    hostedInstructionsUrl?: string;
 }
 
 export interface BankDetailsArgs {

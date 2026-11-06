@@ -52,10 +52,38 @@ export async function getStripeKeyForChannel(ctx: RequestContext, connection: Tr
 }
 
 /** Stripe secret key for an explicit channel id (cron / webhook paths). */
-export async function getStripeKeyForChannelId(connection: TransactionalConnection, channelId: ID): Promise<string | undefined> {
-    const methods = (await findMethodsByHandler(connection, 'stripe')).filter(m => inChannel(m, channelId));
-    const pick = methods.find(m => m.enabled && argValue(m, 'apiKey')) || methods.find(m => argValue(m, 'apiKey'));
-    return pick ? argValue(pick, 'apiKey') : undefined;
+export async function getStripeKeyForChannelId(
+    connection: TransactionalConnection, channelId: ID, opts: StripeMethodPickOptions = {},
+): Promise<string | undefined> {
+    return (await getStripeMethodForChannelId(connection, channelId, opts))?.apiKey;
+}
+
+export interface StripeMethodPickOptions {
+    /**
+     * Prefer the Stripe method that belongs to this channel alone. Vendure also
+     * assigns every new payment method to the default channel, so on the
+     * default channel a second channel's Stripe method (another Stripe
+     * account) can match too. Without this option the first match wins, as it
+     * always has for holds and reconciliation.
+     */
+    preferOwnMethod?: boolean;
+}
+
+/** How many channels other than `channelId` and the default channel also use the method. */
+function sharedWith(method: PaymentMethod, channelId: ID): number {
+    return (method.channels || []).filter(ch => String(ch.id) !== String(channelId) && ch.code !== '__default_channel__').length;
+}
+
+/** The Stripe method (code and secret key) the channel's key lookup picks. */
+export async function getStripeMethodForChannelId(
+    connection: TransactionalConnection, channelId: ID, opts: StripeMethodPickOptions = {},
+): Promise<{ code: string; apiKey: string } | undefined> {
+    let methods = (await findMethodsByHandler(connection, 'stripe')).filter(m => inChannel(m, channelId) && argValue(m, 'apiKey'));
+    // Array sort is stable, so methods that rank equally keep their usual order.
+    if (opts.preferOwnMethod) methods = [...methods].sort((a, b) => sharedWith(a, channelId) - sharedWith(b, channelId));
+    const pick = methods.find(m => m.enabled) || methods[0];
+    const apiKey = pick ? argValue(pick, 'apiKey') : undefined;
+    return pick && apiKey ? { code: pick.code, apiKey } : undefined;
 }
 
 /** The channel's PaymentMethod that uses the `stripe-hold` handler.
