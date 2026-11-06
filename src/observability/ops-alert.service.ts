@@ -8,7 +8,13 @@ const ALWAYS_ALERT = new Set(['hold.webhook_error', 'webhook.error']);
 
 type SmtpSettings = { host: string; port: number; user: string; pass: string; from: string };
 
-/** One pooled transport per SMTP settings tuple, with timeouts (defaults are 2 min / 10 min). */
+/**
+ * One pooled transport per SMTP settings tuple, with timeouts (defaults are 2 min / 10 min).
+ * Connect and greeting get 30 s: a server may hold its greeting while it checks the
+ * sender's reverse DNS (Gmail has taken just over 5 s). The socket idle timer runs
+ * during the greeting wait, so it must be longer, or a server that never greets fails
+ * with a bare "Timeout" instead of "Greeting never received".
+ */
 let transportCache: { key: string; t: any } | null = null;
 function transportFor(nodemailer: any, smtp: SmtpSettings): any {
     const key = [smtp.host, smtp.port, smtp.user, smtp.pass].join('|');
@@ -18,7 +24,7 @@ function transportFor(nodemailer: any, smtp: SmtpSettings): any {
         host: smtp.host, port: smtp.port, secure: smtp.port === 465,
         auth: { user: smtp.user, pass: smtp.pass },
         pool: true, maxConnections: 2, maxMessages: 100,
-        connectionTimeout: 5_000, greetingTimeout: 5_000, socketTimeout: 10_000,
+        connectionTimeout: 30_000, greetingTimeout: 30_000, socketTimeout: 45_000,
     });
     transportCache = { key, t };
     return t;
@@ -99,7 +105,7 @@ export class OpsAlertService {
             const transporter = transportFor(nodemailer, smtp);
             await Promise.race([
                 transporter.sendMail({ from: smtp.from, to, subject: mail.subject, text: mail.text, html: mail.html }),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('smtp timeout (12 s)')), 12_000)),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('smtp timeout (60 s)')), 60_000)),
             ]);
         } catch (e) {
             try { transportCache?.t?.close?.(); } catch { /* ignore */ }
@@ -149,7 +155,7 @@ export class OpsAlertService {
                     ${rows ? `<table cellpadding="4">${rows}</table>` : ''}
                     </div>`,
                 }),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('smtp timeout (12 s)')), 12_000)),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('smtp timeout (60 s)')), 60_000)),
             ]);
         } catch (e: any) {
             // Drop a broken pooled connection so the next alert reconnects.

@@ -5,6 +5,11 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.9] — 2026-11-05
+
+### Fixed
+- **Ops e-mails failed when the mail server was slow to greet.** The SMTP transport for ops e-mails allowed 5 seconds to connect and 5 seconds for the server's greeting. A mail server may hold its greeting while it checks the sending host's reverse DNS (Gmail has taken just over 5 seconds), so alert e-mails and the weekly report failed with "Greeting never received". Connecting and the greeting now get 30 seconds each, and a whole send may take 60 seconds instead of 12. The socket idle timeout is 45 seconds instead of 10. It also runs while the server has not greeted yet, so it is longer than the greeting timeout, and a server that never greets is still reported as "Greeting never received" rather than a bare "Timeout". Chat and webhook alerts were not affected.
+
 ## [0.2.8] — 2026-11-05
 
 ### Package metadata
