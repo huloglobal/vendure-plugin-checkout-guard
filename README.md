@@ -22,7 +22,7 @@ yarn add @huloglobal/vendure-plugin-checkout-guard   # or npm install / pnpm add
 
 1. Register `CheckoutGuardPlugin.init({ publicBaseUrl })` in `vendure-config.ts` (full options under [Install](#install)).
 2. Add `CheckoutGuardPlugin.uiExtensions` to your `compileUiExtensions` call and rebuild the admin UI.
-3. Restart Vendure. The tables are created on first boot; there is no migration to run.
+3. Restart Vendure. The plugin's own tables are created on first boot. It also adds Order custom fields (`cgSessionHash`, and `cgClientIp` when `orderClientIp` is on), so with `synchronize: false` generate and run a migration as described under Installation.
 4. Open *Sales → Checkout guard* and click **Start 14-day free trial** to switch the premium features on, or stay on the free tier (see [Tiers](#tiers)).
 
 
