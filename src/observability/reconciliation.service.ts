@@ -7,7 +7,7 @@ import { ObservabilityService } from './observability.service';
 import { CounterService } from './counter.service';
 import { STATE_TABLE } from './schema';
 import { formatMinor, OpsAlertService } from './ops-alert.service';
-import { findOrphanIntents, listStripePaymentIntents } from './reconciliation';
+import { findDriftIntents, findOrphanIntents, KnownPayment, listStripePaymentIntents } from './reconciliation';
 import { hasPremium, loggerCtx, noteLocked, runtimeOptions } from './runtime';
 import { OrphanCandidate } from './types';
 
@@ -18,6 +18,9 @@ export interface ReconciliationRunResult {
     intentsScanned: number;
     orphansFound: number;
     orphansNew: number;
+    /** Known intents whose Stripe amount differs from the Vendure payment (`reconciliation.amountDrift`). */
+    driftFound?: number;
+    driftNew?: number;
     incomplete: boolean;
     startedAt: string;
     finishedAt: string;
@@ -181,7 +184,11 @@ export class ReconciliationService {
             return result;
         }
 
-        const known = await this.knownTransactionIds(lookback + 2);
+        const knownPayments = await this.knownPayments(lookback + 2);
+        const known = new Set(knownPayments.keys());
+        const driftOn = runtimeOptions().reconciliation?.amountDrift === true;
+        const newDrift: Array<{ id: string; text: string }> = [];
+        if (driftOn) { result.driftFound = 0; result.driftNew = 0; }
         const createdGte = Math.floor(Date.now() / 1000) - lookback * 86_400;
         const newOrphans: Array<OrphanCandidate & { channelId: number }> = [];
 
@@ -212,6 +219,29 @@ export class ReconciliationService {
                 });
                 if (id) newOrphans.push({ ...o, channelId });
             }
+            if (driftOn) {
+                const drift = findDriftIntents(intents, knownPayments);
+                result.driftFound = (result.driftFound || 0) + drift.length;
+                const seen = await this.events.existingPaymentEventRefs('amount_drift', drift.map(d => d.paymentIntentId));
+                for (const d of drift) {
+                    if (seen.has(d.paymentIntentId)) continue;
+                    const text = `Stripe ${d.status === 'succeeded' ? 'took' : 'holds'} ${formatMinor(d.stripeMinor, d.currency)} for ${d.paymentIntentId} but the Vendure payment is ${formatMinor(d.vendureMinor, d.currency)}`;
+                    const id = await this.events.recordPaymentEvent({
+                        channelId: account.channelIds[0], orderId: d.orderId, orderCode: d.orderCode, kind: 'amount_drift', provider: 'stripe',
+                        providerRef: d.paymentIntentId, code: d.stripeMinor < d.vendureMinor ? 'stripe_less' : 'stripe_more', message: text,
+                        amountMinor: d.stripeMinor, currency: d.currency,
+                    });
+                    if (id) { result.driftNew = (result.driftNew || 0) + 1; newDrift.push({ id: d.paymentIntentId, text: d.orderCode ? `${text} (order ${d.orderCode})` : text }); }
+                }
+            }
+        }
+        if (newDrift.length) {
+            await this.ops.alert({
+                event: 'payment.amount_drift',
+                text: `Checkout Guard reconciliation: ${newDrift.length} Stripe payment(s) whose amount differs from Vendure.\n`
+                    + newDrift.slice(0, 10).map(d => `• ${d.text}`).join('\n') + (newDrift.length > 10 ? `\n…and ${newDrift.length - 10} more` : ''),
+                provider: 'stripe',
+            });
         }
 
         result.orphansNew = newOrphans.length;
@@ -265,25 +295,38 @@ export class ReconciliationService {
         return [...byKey.values()];
     }
 
-    /** `payment.transactionId` values that look like PaymentIntents, recent enough to overlap the window. */
-    private async knownTransactionIds(days: number): Promise<Set<string>> {
+    /** Payments whose transaction (or metadata) names a PaymentIntent, recent enough to overlap the window. */
+    private async knownPayments(days: number): Promise<Map<string, KnownPayment>> {
         const db = adapterFor(this.connection.rawConnection);
         // One pass over the window: the transaction id, and (for holds created
         // through the webhook) the intent carried in metadata. Backticks keep
         // Vendure's camelCase columns intact on Postgres.
-        const rows: Array<{ transactionId: string | null; metadata: any }> = await db.query(
-            `SELECT \`transactionId\`, metadata FROM payment WHERE \`createdAt\` > DATE_SUB(NOW(), INTERVAL ? DAY)`,
+        const rows: Array<{ transactionId: string | null; metadata: any; amount: any; state: string; orderCode: string | null; orderId: any; currencyCode: string | null }> = await db.query(
+            `SELECT p.\`transactionId\`, p.metadata, p.amount, p.state, o.code AS orderCode, o.id AS orderId, o.\`currencyCode\`
+             FROM payment p LEFT JOIN \`order\` o ON o.id = p.\`orderId\`
+             WHERE p.\`createdAt\` > DATE_SUB(NOW(), INTERVAL ? DAY)`,
             [Math.max(1, Math.floor(days))],
         ).catch(() => []);
-        const set = new Set<string>();
+        const map = new Map<string, KnownPayment>();
         for (const r of rows) {
-            if (r.transactionId && String(r.transactionId).startsWith('pi_')) { set.add(String(r.transactionId)); continue; }
-            try {
-                const m = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata;
-                const pi = m?.paymentIntentId || m?.public?.paymentIntentId;
-                if (typeof pi === 'string' && pi.startsWith('pi_')) set.add(pi);
-            } catch { /* not JSON */ }
+            let pi: string | null = null;
+            if (r.transactionId && String(r.transactionId).startsWith('pi_')) pi = String(r.transactionId);
+            else {
+                try {
+                    const m = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata;
+                    const v = m?.paymentIntentId || m?.public?.paymentIntentId;
+                    if (typeof v === 'string' && v.startsWith('pi_')) pi = v;
+                } catch { /* not JSON */ }
+            }
+            if (!pi) continue;
+            const entry: KnownPayment = {
+                amount: Number(r.amount) || 0, state: String(r.state || ''), orderCode: r.orderCode ?? null,
+                orderId: r.orderId !== null && r.orderId !== undefined ? Number(r.orderId) : null, currency: r.currencyCode ?? null,
+            };
+            // Several rows for one intent (a cancelled retry, then the live one): the live one wins.
+            const prev = map.get(pi);
+            if (!prev || (prev.state !== 'Authorized' && prev.state !== 'Settled')) map.set(pi, entry);
         }
-        return set;
+        return map;
     }
 }

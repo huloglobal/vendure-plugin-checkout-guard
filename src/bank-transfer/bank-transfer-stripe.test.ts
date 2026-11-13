@@ -431,7 +431,7 @@ describe('webhook controller routing', () => {
     });
 });
 
-describe('hold webhook while premium is locked', () => {
+describe('hold webhook on the free tier', () => {
     const card = (capture_method: string) => ({
         type: 'payment_intent.succeeded',
         data: { object: { id: 'pi_card1', status: 'succeeded', capture_method, amount: 1000, currency: 'gbp', metadata: { channelToken: 'tok-ld', orderCode: 'ORD9', orderId: '9' } } },
@@ -448,13 +448,12 @@ describe('hold webhook while premium is locked', () => {
     afterEach(() => configureStripeHold({ acknowledgeNonHoldEventsWhileLocked: () => false }));
 
     it('acknowledges a card payment\'s success when Stripe bank transfers share the endpoint', async () => {
-        expect(await holds.handleEvent(card('automatic'))).toEqual({ status: 200, message: 'Event payment_intent.succeeded is not for a hold; ignored while Checkout Guard premium is locked' });
+        expect(await holds.handleEvent(card('automatic'))).toEqual({ status: 200, message: 'Automatic-capture intent, handled by the Stripe plugin' });
     });
 
-    it('still answers 503 for a hold, and for everything when the flag is off (0.2.9)', async () => {
-        expect((await holds.handleEvent(card('manual'))).status).toBe(503);
+    it('never answers 503 any more: holds are handled on the free tier (0.4.0)', async () => {
         flag = false;
-        expect((await holds.handleEvent(card('automatic'))).status).toBe(503);
+        expect((await holds.handleEvent(card('automatic'))).status).toBe(200);
     });
 });
 

@@ -13,11 +13,21 @@ export const PLUGIN_NAME = 'Checkout Guard';
 export const ADMIN_ROUTE = 'checkout-guard';
 export const BUY_URL = `https://elite.charity/licence/buy/${SHORT_ID}`;
 
+/**
+ * What a licence (or the 14-day evaluation) adds. Free since 0.4.0: the
+ * Stripe hold list with capture and release, the decline log, the login
+ * guard, shared limiter state, admin settings, the blocked list, the client
+ * IP on the order, the automatic per-order card-testing gate and the
+ * `orderByCode` lookup limit.
+ */
 export const PREMIUM_FEATURES: string[] = [
-    'Stripe authorise-then-capture holds',
-    'Bank-transfer expiry and reminders',
-    'Nightly reconciliation of orphaned charges',
-    'Ops alerts to Slack/Teams/Discord/email',
+    'Auto-capture and the safety capture of Stripe holds',
+    'HULO Payments for Vendure holds in the hold list',
+    'Bank-transfer auto-expiry, reminders and customer e-mails',
+    'Nightly reconciliation: orphaned charges and amount drift',
+    'Amount-drift guard at settlement',
+    'Ops alerts to Slack/Teams/Discord/Telegram/webhook/e-mail',
+    'Weekly report and setup checklist',
 ];
 
 /** The numeric keys reported to the licence server (heartbeat + evaluation). */

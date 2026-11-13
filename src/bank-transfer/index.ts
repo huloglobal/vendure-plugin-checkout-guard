@@ -70,3 +70,5 @@ export {
 export type { BankTransferOpsEvent, BankTransferOpsEventName, BankTransferRuntime } from './bank-transfer-runtime';
 export { addDays, classifyBankTransfer, daysUntil } from './expiry-policy';
 export type { BankTransferSweepDecision, BankTransferSweepInput } from './expiry-policy';
+export { BankTransferEmailSubscriber, composeBankEmail, setBankEmailRuntime } from './bank-emails';
+export type { BankEmailRuntime } from './bank-emails';

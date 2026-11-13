@@ -45,9 +45,10 @@ describe('stats helpers', () => {
         expect(headlineStats({ ...stats, heldValuePence: 0, holdsPlaced: 0, holdsCaptured: 0, holdsCancelled: 0, bankTransfersConfirmed: 0, rateLimitRejections: 0, orderAccessDenied: 0 })).toEqual([]);
     });
 
-    it('lists four premium features', () => {
-        expect(PREMIUM_FEATURES).toHaveLength(4);
-        expect(PREMIUM_FEATURES[0]).toMatch(/Stripe/);
+    it('lists the premium features (hold list, capture and release are free since 0.4.0)', () => {
+        expect(PREMIUM_FEATURES).toHaveLength(7);
+        expect(PREMIUM_FEATURES.join(' ')).toMatch(/Weekly report and setup checklist/);
+        expect(PREMIUM_FEATURES.join(' ')).not.toMatch(/authorise-then-capture holds/);
     });
 });
 

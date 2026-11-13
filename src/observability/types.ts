@@ -14,10 +14,11 @@ export const PAYMENT_EVENT_KINDS = [
 ] as const;
 export type PaymentEventKind = typeof PAYMENT_EVENT_KINDS[number];
 
-/** Kinds that only a licensed / trial install records (the free tier
- *  keeps client-side declines and bank-transfer expiries). */
+/** Kinds that only a licensed / trial install records. The free tier keeps
+ *  declines (webhook `failed` and browser `client_declined`: the decline log
+ *  the card-testing gate counts, free since 0.4.0) and bank-transfer expiries. */
 export const PREMIUM_EVENT_KINDS: ReadonlySet<PaymentEventKind> = new Set<PaymentEventKind>([
-    'failed', 'orphan', 'amount_drift', 'hold_expired',
+    'orphan', 'amount_drift', 'hold_expired',
 ]);
 
 export interface PaymentEventInput {
@@ -139,6 +140,8 @@ export interface StripeIntentLite {
     id: string;
     status: string;
     amount: number;
+    /** Captured amount (succeeded intents). */
+    amountReceived?: number | null;
     currency: string;
     created: number;
     metadata?: Record<string, string> | null;

@@ -141,6 +141,35 @@ export class CheckoutGuardService {
         await this.prefs.ensureTable();
     }
 
+    /** Premium (licence or evaluation) in force right now. */
+    premium(): boolean {
+        try { return !!this.hooks?.hasPremiumAccess(); } catch { return false; }
+    }
+
+    private digestTimer: NodeJS.Timeout | null = null;
+
+    /**
+     * Worker-side scheduler for the weekly report (PREMIUM since 0.4.0): the
+     * SDK digest's own clock decides when a report is due, but a tick only
+     * runs while premium is active, so a lapsed licence stops the report
+     * (its settings and history are kept) and a renewed one resumes it.
+     */
+    startDigestLoop(digest: WeeklyDigest, tickMs: number = 60 * 60_000): void {
+        if (this.digestTimer) return;
+        const tick = () => {
+            if (!this.premium()) return;
+            void digest.tick().catch(() => false);
+        };
+        const first = setTimeout(tick, 90_000);
+        if (typeof first.unref === 'function') first.unref();
+        this.digestTimer = setInterval(tick, Math.max(5 * 60_000, tickMs));
+        if (typeof this.digestTimer.unref === 'function') this.digestTimer.unref();
+    }
+
+    stopDigestLoop(): void {
+        if (this.digestTimer) { clearInterval(this.digestTimer); this.digestTimer = null; }
+    }
+
     get digest(): WeeklyDigest {
         if (!this.digestInternal) throw new Error('Checkout Guard engagement is not initialised yet');
         return this.digestInternal;
@@ -288,7 +317,11 @@ export class CheckoutGuardService {
         return (await this.prefs.get('eval.leadEmail')) || null;
     }
 
-    async digestSettings(): Promise<WeeklyDigestSettings> { return this.digest.settings(); }
+    async digestSettings(): Promise<WeeklyDigestSettings & { premium: boolean }> {
+        const st = await this.digest.settings();
+        // Without premium nothing is sent: say so instead of promising a date.
+        return { ...st, nextDueAt: this.premium() ? st.nextDueAt : null, premium: this.premium() };
+    }
     async updateDigestSettings(patch: { enabled?: boolean; recipient?: string | null }): Promise<WeeklyDigestSettings> { return this.digest.updateSettings(patch); }
 
     /** Week-to-date preview without sending. */

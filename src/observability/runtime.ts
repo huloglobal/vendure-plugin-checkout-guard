@@ -38,7 +38,7 @@ export interface ObservabilityOpsOptions {
 
 export interface ObservabilityOptions {
     stripe?: { holdMethodCode?: string };
-    reconciliation?: { enabled?: boolean; lookbackDays?: number };
+    reconciliation?: { enabled?: boolean; lookbackDays?: number; amountDrift?: boolean };
     trustedClientIp?: { header?: string; secretHeader?: string; secret?: string; trustedProxies?: string[]; trustCloudflareHeader?: boolean };
     ops?: ObservabilityOpsOptions;
 }

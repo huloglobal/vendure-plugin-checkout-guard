@@ -36,6 +36,21 @@ export async function findMethodsByHandler(connection: TransactionalConnection, 
     return hit.all.filter(m => m.handler?.code === handlerCode);
 }
 
+/** HULO Payments handlers whose Authorized payments are never card holds. */
+const HULO_NON_HOLD_HANDLERS = new Set(['hulo-bank-transfer', 'hulo-pay-later']);
+
+/**
+ * Codes of every PaymentMethod backed by a HULO Payments for Vendure handler
+ * that can hold funds (`hulo-*`, except bank transfer and pay later). Soft
+ * dependency: matched by handler code only, nothing is imported.
+ */
+export async function getHuloPaymentsMethodCodes(connection: TransactionalConnection): Promise<string[]> {
+    const key = (connection?.rawConnection as object) || connection;
+    await findMethodsByHandler(connection, ''); // refreshes the cached list when it is stale
+    const all = methodsCache.get(key)?.all || [];
+    return all.filter(m => /^hulo-[a-z0-9-]+$/.test(m.handler?.code || '') && !HULO_NON_HOLD_HANDLERS.has(m.handler.code)).map(m => m.code);
+}
+
 /** Tests / method edits: forget the cached payment methods for a connection. */
 export function resetMethodsCache(connection?: TransactionalConnection): void {
     if (connection) methodsCache.delete((connection.rawConnection as object) || connection);

@@ -69,6 +69,60 @@ export function findOrphanIntents(
     return out;
 }
 
+/** What Vendure recorded for a PaymentIntent it knows. */
+export interface KnownPayment {
+    /** Vendure minor units. */
+    amount: number;
+    state: string;
+    orderCode: string | null;
+    orderId: number | null;
+    currency: string | null;
+}
+
+export interface DriftCandidate {
+    paymentIntentId: string;
+    /** What Stripe holds or took, in Vendure minor units. */
+    stripeMinor: number;
+    /** What the Vendure payment says, in Vendure minor units. */
+    vendureMinor: number;
+    currency: string;
+    orderCode: string | null;
+    orderId: number | null;
+    status: string;
+}
+
+/** Stripe minor units → Vendure minor units (zero-decimal currencies are ×100 in Vendure). */
+const ZERO_DECIMAL = new Set(['BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'MGA', 'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF']);
+export function stripeToVendureMinor(amount: number, currency: string): number {
+    return ZERO_DECIMAL.has(String(currency || '').toUpperCase()) ? Math.round(amount * 100) : Math.round(amount);
+}
+
+/**
+ * Amount-drift flag (premium, opt-in): intents Vendure DOES know whose
+ * amount at Stripe differs from the Vendure payment — a dashboard partial
+ * capture or refund-and-recharge, an edited intent, a payment recorded for
+ * the wrong total. Only Authorized/Settled payments are compared; a
+ * succeeded intent is judged by what was received.
+ */
+export function findDriftIntents(intents: StripeIntentLite[], known: ReadonlyMap<string, KnownPayment>): DriftCandidate[] {
+    const out: DriftCandidate[] = [];
+    for (const pi of intents) {
+        if (!pi || typeof pi.id !== 'string' || !RECONCILE_STATUSES.has(pi.status)) continue;
+        const k = known.get(pi.id);
+        if (!k || (k.state !== 'Authorized' && k.state !== 'Settled')) continue;
+        const raw = pi.status === 'succeeded' && Number.isFinite(Number(pi.amountReceived)) && Number(pi.amountReceived) > 0
+            ? Number(pi.amountReceived) : Number(pi.amount);
+        if (!Number.isFinite(raw)) continue;
+        const stripeMinor = stripeToVendureMinor(raw, pi.currency);
+        if (stripeMinor === Math.round(Number(k.amount) || 0)) continue;
+        out.push({
+            paymentIntentId: pi.id, stripeMinor, vendureMinor: Math.round(Number(k.amount) || 0),
+            currency: String(pi.currency || k.currency || '').toUpperCase(), orderCode: k.orderCode, orderId: k.orderId, status: pi.status,
+        });
+    }
+    return out;
+}
+
 export type FetchLike = (url: string, init?: any) => Promise<{ ok: boolean; status: number; json(): Promise<any> }>;
 
 export interface ListIntentsOptions {
@@ -130,6 +184,7 @@ export async function listStripePaymentIntents(
                 id: pi.id,
                 status: pi.status,
                 amount: pi.amount,
+                amountReceived: Number.isFinite(Number(pi.amount_received)) ? Number(pi.amount_received) : null,
                 currency: pi.currency,
                 created: pi.created,
                 metadata: pi.metadata || null,

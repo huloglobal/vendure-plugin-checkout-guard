@@ -38,6 +38,7 @@ export type StripeHoldEventKind = 'failed' | 'hold_expired';
 /** Shape handed to the observability module (`checkout_guard_payment_event`). */
 export interface StripeHoldPaymentEvent {
     kind: StripeHoldEventKind;
+    ip?: string | null;
     provider: 'stripe';
     channelId?: ID;
     orderId?: ID;
@@ -89,6 +90,10 @@ export interface StripeHoldRuntime {
      * and days of 503s could get it disabled. Off by default (0.2.9 behaviour).
      */
     acknowledgeNonHoldEventsWhileLocked?(): boolean;
+    /** Premium hold sources besides Stripe holds (`holds` option). Default none. */
+    holdSources?(): { huloPayments: boolean; huloPaymentsSafetyCapture: boolean };
+    /** The client IP stored on an order (opt-in `orderClientIp`), to attribute webhook declines. */
+    orderClientIp?(orderCode: string): Promise<string | null>;
 }
 
 export const STRIPE_HOLD_DEFAULTS = Object.freeze({
@@ -102,6 +107,8 @@ const noopRuntime: StripeHoldRuntime = {
     notifyOps: async () => undefined,
     recordPaymentEvent: async () => undefined,
     acknowledgeNonHoldEventsWhileLocked: () => false,
+    holdSources: () => ({ huloPayments: false, huloPaymentsSafetyCapture: false }),
+    orderClientIp: async () => null,
 };
 
 let runtime: StripeHoldRuntime = noopRuntime;

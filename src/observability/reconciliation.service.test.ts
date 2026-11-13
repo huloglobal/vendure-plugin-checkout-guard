@@ -14,6 +14,7 @@ function pi(id: string, over: Record<string, any> = {}) {
 let conn: FakeConnection;
 let state: Map<string, string>;
 let known: string[];
+let knownAmount = 12999;
 let events: any[];
 let observability: any;
 let ops: { alert: ReturnType<typeof vi.fn> };
@@ -25,6 +26,7 @@ let stripePages: any[][];
 beforeEach(() => {
     state = new Map();
     known = ['pi_known1'];
+    knownAmount = 12999;
     events = [];
     premium = true;
     options = { reconciliation: { enabled: true, lookbackDays: 3 } };
@@ -32,7 +34,7 @@ beforeEach(() => {
     conn = new FakeConnection({
         query: (sql: string, params: any[] = []) => {
             const s = sql.replace(/\s+/g, ' ');
-            if (/SELECT `transactionId`, metadata FROM payment/.test(s)) return known.map(t => ({ transactionId: t, metadata: null }));
+            if (/SELECT p\.`transactionId`, p\.metadata, p\.amount, p\.state/.test(s)) return known.map(t => ({ transactionId: t, metadata: null, amount: knownAmount, state: 'Settled', orderCode: 'ORD-' + t, orderId: 5, currencyCode: 'GBP' }));
             if (/INSERT INTO checkout_guard_state/.test(s)) { state.set(params[0], params[1]); return { affectedRows: 1 }; }
             if (/SELECT v FROM checkout_guard_state/.test(s)) { const v = state.get(params[0]); return v ? [{ v }] : []; }
             return [];
@@ -138,5 +140,33 @@ describe('runOnce', () => {
         expect((await svc.status()).lookbackDays).toBe(3);
         state.set('reconcile:last', JSON.stringify({ ran: true, startedAt: '2026-09-01T00:00:00Z', orphansNew: 5 }));
         expect((await svc.status()).lastRun).toMatchObject({ orphansNew: 5 });
+    });
+});
+
+describe('amount drift (premium, opt-in)', () => {
+    it('is not checked unless reconciliation.amountDrift is on', async () => {
+        knownAmount = 10000;
+        const r = await svc.runOnce();
+        expect(r.driftFound).toBeUndefined();
+        expect(events.filter(e => e.kind === 'amount_drift')).toHaveLength(0);
+    });
+
+    it('flags a known intent whose Stripe amount differs, once, and alerts', async () => {
+        options = { reconciliation: { enabled: true, lookbackDays: 3, amountDrift: true } };
+        knownAmount = 10000;
+        const r = await svc.runOnce();
+        expect(r).toMatchObject({ driftFound: 1, driftNew: 1 });
+        const drift = events.filter(e => e.kind === 'amount_drift');
+        expect(drift).toHaveLength(1);
+        expect(drift[0]).toMatchObject({ providerRef: 'pi_known1', orderCode: 'ORD-pi_known1', amountMinor: 12999, code: 'stripe_more' });
+        expect(ops.alert.mock.calls.map(c => c[0].event)).toContain('payment.amount_drift');
+        const again = await svc.runOnce();
+        expect(again).toMatchObject({ driftFound: 1, driftNew: 0 });
+    });
+
+    it('leaves matching amounts alone', async () => {
+        options = { reconciliation: { enabled: true, lookbackDays: 3, amountDrift: true } };
+        const r = await svc.runOnce();
+        expect(r).toMatchObject({ driftFound: 0, driftNew: 0 });
     });
 });

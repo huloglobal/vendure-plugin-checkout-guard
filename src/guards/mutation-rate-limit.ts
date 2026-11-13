@@ -7,6 +7,7 @@ import { ClientIpResolveOptions, getClientIp } from './client-ip';
 import { GUARDS_LOGGER_CTX } from './constants';
 import { bumpCounter } from './counters';
 import { CardTestingGate, CardTestingOptions, cardTestingBlockedBody, resolveCardTestingOptions } from './card-testing';
+import { currentLimiterStore, hitFixedWindow } from './limiter-store';
 
 export interface MutationRateLimit {
     /** Requests allowed per window (token-bucket capacity). */
@@ -247,6 +248,12 @@ export interface MutationRateLimitHandlerOptions {
     onLimited?: (info: { mutation: string; key: string; limit: MutationRateLimit }) => void;
     /** Card-testing gate (see `card-testing.ts`). Defaults on; pass `false` to disable. */
     cardTesting?: CardTestingOptions | false;
+    /** Read the limit overrides on every request (admin-editable settings). Wins over `limits`. */
+    getLimits?: () => MutationRateLimitOverrides | undefined;
+    /** Read the card-testing options on every request (admin-editable settings). Wins over `cardTesting`. */
+    getCardTesting?: () => CardTestingOptions | false | undefined;
+    /** Use this gate instance (the plugin shares one with the admin blocked list). */
+    gate?: CardTestingGate;
 }
 
 /** Body of the 429 response. */
@@ -261,28 +268,62 @@ export function rateLimitedBody(mutation: string): { errors: Array<{ message: st
  * bodies without a limited mutation pass straight through.
  */
 export function createMutationRateLimitHandler(opts: MutationRateLimitHandlerOptions = {}): RequestHandler {
-    const limits = resolveMutationRateLimits(opts.limits);
-    const limiters = new Map<string, { limiter: RateLimiter; limit: MutationRateLimit }>();
-    for (const [name, limit] of Object.entries(limits)) {
-        limiters.set(name, {
-            limiter: new RateLimiter({ capacity: limit.capacity, windowMs: limit.windowMs, maxKeys: opts.maxKeys }),
-            limit,
-        });
-    }
-    const names = Array.from(limiters.keys());
     const ipOpts: ClientIpResolveOptions = { ...(opts.clientIp || {}), header: opts.clientIp?.header || opts.clientIpHeader };
     const keyFor = opts.keyFor || ((req: Request) => rateLimitBucket(getClientIp(req, ipOpts)));
     const onLimited = opts.onLimited || (({ mutation, key, limit }) => {
         Logger.warn(`Rate limit hit: ${mutation} from ${key} (${limit.capacity}/${Math.round(limit.windowMs / 1000)}s)`, GUARDS_LOGGER_CTX);
     });
 
-    const gateOpts = resolveCardTestingOptions(opts.cardTesting);
-    const gate = gateOpts ? new CardTestingGate(gateOpts) : null;
-    const known = gate ? Array.from(new Set([...names, ...gate.opts.mutations])) : names;
+    /** Limits and gate options can change at runtime (admin settings): rebuilt when their JSON changes. */
+    let stateKey = '';
+    let limiters = new Map<string, { limiter: RateLimiter; limit: MutationRateLimit }>();
+    let names: string[] = [];
+    let gate: CardTestingGate | null = null;
+    let known: string[] = [];
+    const refresh = () => {
+        const limitOverrides = opts.getLimits ? opts.getLimits() : opts.limits;
+        const cardTesting = opts.getCardTesting ? opts.getCardTesting() : opts.cardTesting;
+        const limits = resolveMutationRateLimits(limitOverrides);
+        const gateOpts = resolveCardTestingOptions(cardTesting);
+        const key = JSON.stringify([limits, gateOpts]);
+        if (key === stateKey) return;
+        stateKey = key;
+        const next = new Map<string, { limiter: RateLimiter; limit: MutationRateLimit }>();
+        for (const [name, limit] of Object.entries(limits)) {
+            const prev = limiters.get(name);
+            // An unchanged limit keeps its buckets (a settings save must not reset abusers).
+            next.set(name, prev && prev.limit.capacity === limit.capacity && prev.limit.windowMs === limit.windowMs
+                ? prev
+                : { limiter: new RateLimiter({ capacity: limit.capacity, windowMs: limit.windowMs, maxKeys: opts.maxKeys }), limit });
+        }
+        limiters = next;
+        names = Array.from(limiters.keys());
+        if (!gateOpts) {
+            gate = null;
+        } else {
+            gate = gate ?? opts.gate ?? new CardTestingGate(gateOpts);
+            gate.setOptions(gateOpts);
+        }
+        known = gate ? Array.from(new Set([...names, ...gate.opts.mutations])) : names;
+    };
+    refresh();
     /** APQ hash → mutation call counts, learnt from requests that carried the document. */
     const apq = new Map<string, Map<string, number>>();
 
+    /** One limiter decision: the shared fixed-window store when one is selected, else the token bucket. */
+    const allowInMemory = (mutation: string, key: string, calls: number, entry: { limiter: RateLimiter; limit: MutationRateLimit }): boolean => {
+        let ok = calls <= entry.limit.capacity;
+        for (let i = 0; ok && i < calls; i++) ok = entry.limiter.allow(`${mutation}|${key}`);
+        return ok;
+    };
+    const allowShared = async (mutation: string, key: string, calls: number, entry: { limiter: RateLimiter; limit: MutationRateLimit }): Promise<boolean> => {
+        if (calls > entry.limit.capacity) return false;
+        const r = await hitFixedWindow(`mutation:${mutation}`, key, entry.limit.windowMs, calls);
+        return r.count <= entry.limit.capacity;
+    };
+
     const handle = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+        refresh();
         if ((names.length === 0 && !gate) || req.method !== 'POST') {
             next();
             return;
@@ -322,10 +363,10 @@ export function createMutationRateLimitHandler(opts: MutationRateLimitHandlerOpt
             if (!entry) continue;
             // One token per call: aliased copies and batched operations each pay.
             const calls = counts.get(mutation) || 1;
-            let allowed = calls <= entry.limit.capacity;
-            for (let i = 0; allowed && i < calls; i++) {
-                allowed = entry.limiter.allow(`${mutation}|${key}`);
-            }
+            // Memory (the default) stays synchronous; a shared store is one await.
+            const allowed = currentLimiterStore() === 'memory'
+                ? allowInMemory(mutation, key, calls, entry)
+                : await allowShared(mutation, key, calls, entry);
             if (!allowed) {
                 bumpCounter('rate_limit');
                 onLimited({ mutation, key, limit: entry.limit });
@@ -336,15 +377,16 @@ export function createMutationRateLimitHandler(opts: MutationRateLimitHandlerOpt
                 return;
             }
         }
-        const gated = gate && gate.isActive() ? invoked.filter(m => gate.covers(m)) : [];
-        if (gated.length === 0) {
+        const g = gate;
+        const gated = g && g.isActive() ? invoked.filter(m => g.covers(m)) : [];
+        if (!g || gated.length === 0) {
             next();
             return;
         }
         // Only the payment mutations wait on the (cached) failure lookup.
         const ip = getClientIp(req, ipOpts);
         for (const mutation of gated) {
-            const verdict = await gate!.check(ip, mutation);
+            const verdict = await g.check(ip, mutation);
             if (verdict.blocked) {
                 Logger.warn(`Card-testing gate: ${mutation} refused for ${ip} (${verdict.failures} failed attempts; blocked until ${verdict.blockedUntil?.toISOString()})`, GUARDS_LOGGER_CTX);
                 res.status(429);

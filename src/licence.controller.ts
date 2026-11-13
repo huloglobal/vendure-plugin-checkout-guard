@@ -57,8 +57,10 @@ export class CheckoutGuardLicenceController {
     @Get('setup')
     async setup(@Ctx() ctx: RequestContext, @Res() res: Response) {
         if (denyUnlessAdmin(ctx, res, false)) return;
+        // The setup checklist is premium (0.4.0): nothing to show on the free tier.
+        if (!this.service.premium()) return res.json({ items: [], complete: true, premium: false });
         try {
-            return res.json(await this.service.setup());
+            return res.json({ ...(await this.service.setup()), premium: true });
         } catch (e: any) {
             Logger.warn(`Setup checklist failed: ${e?.message || e}`, loggerCtx);
             return res.json({ items: [], complete: true });
@@ -101,6 +103,7 @@ export class CheckoutGuardLicenceController {
     @Post('digest/send-test')
     async digestSendTest(@Ctx() ctx: RequestContext, @Res() res: Response, @Body() body: any) {
         if (denyUnlessAdmin(ctx, res, true)) return;
+        if (!this.service.premium()) return res.status(402).json({ error: 'premium_required', message: 'The weekly report needs a licence or the 14-day evaluation.', buyUrl: `https://elite.charity/licence/buy/${PLUGIN_ID}` });
         const to = String(body?.to || '').trim().slice(0, 320);
         if (to && !/^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,}$/.test(to)) return res.status(400).json({ message: 'Enter a valid email address' });
         const r = await this.service.digest.sendNow(to || null);
@@ -111,6 +114,7 @@ export class CheckoutGuardLicenceController {
     @Get('digest/preview')
     async digestPreview(@Ctx() ctx: RequestContext, @Res() res: Response) {
         if (denyUnlessAdmin(ctx, res, false)) return;
+        if (!this.service.premium()) return res.status(402).json({ error: 'premium_required', message: 'The weekly report needs a licence or the 14-day evaluation.', buyUrl: `https://elite.charity/licence/buy/${PLUGIN_ID}` });
         const mail = await this.service.digestPreview();
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
         res.setHeader('Cache-Control', 'no-store');

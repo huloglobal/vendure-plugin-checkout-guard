@@ -145,15 +145,20 @@ export class ObservabilityService implements OnModuleInit {
      * `windowMinutes`. Consumed by fraud scoring (fraud-prevention 0.19
      * reads the table directly; hosts may call this instead).
      */
-    async countRecentFailures(ip: string, windowMinutes: number = 60): Promise<number> {
+    async countRecentFailures(ip: string, windowMinutes: number = 60, since?: Date | null): Promise<number> {
         if (!ip) return 0;
         const minutes = Math.max(1, Math.min(60 * 24 * 30, Math.floor(Number(windowMinutes) || 60)));
-        const [row] = await this.db.query(
-            `SELECT COUNT(*) AS n FROM ${PAYMENT_EVENT_TABLE}
+        let sql = `SELECT COUNT(*) AS n FROM ${PAYMENT_EVENT_TABLE}
              WHERE ip = ? AND kind IN ('failed', 'client_declined')
-               AND createdAt > DATE_SUB(NOW(), INTERVAL ? MINUTE)`,
-            [ip, minutes],
-        ).catch(() => [{ n: 0 }]);
+               AND createdAt > DATE_SUB(NOW(), INTERVAL ? MINUTE)`;
+        const params: unknown[] = [ip, minutes];
+        // An admin unblock: attempts before it no longer count.
+        // Expressed as seconds ago so the database clock is the only clock involved.
+        if (since instanceof Date && Number.isFinite(since.getTime())) {
+            sql += ' AND createdAt > DATE_SUB(NOW(3), INTERVAL ? SECOND)';
+            params.push(Math.max(0, Math.floor((Date.now() - since.getTime()) / 1000)));
+        }
+        const [row] = await this.db.query(sql, params).catch(() => [{ n: 0 }]);
         return Number(row?.n || 0);
     }
 

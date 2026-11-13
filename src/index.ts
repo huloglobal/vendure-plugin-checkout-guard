@@ -16,3 +16,8 @@ export * from './observability';
 // Both modules expose a `formatMinor`; the Stripe-hold one is the public helper.
 export { formatMinor } from './stripe-hold';
 export { fanOutOpsEvent, OpsChannels, OpsEvent } from './ops-notify';
+export { SettingsService, SETTINGS_PREF_KEY } from './settings/settings.service';
+export {
+    sanitiseAdminSettings, mergeAdminSettings, resolveLoginGuard, resolveOrderLookup, AdminSettings, LoginGuardOptions,
+    OrderLookupLimitOptions, HoldSourcesOptions,
+} from './settings/admin-settings';

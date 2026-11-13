@@ -3,7 +3,8 @@ import {
     fingerprintPublicKey, Heartbeat, LicenceStatus, RevocationChecker, UpdateChecker, verifyLicence,
     warnIfIncompatibleVendure, EvaluationClient, EvaluationState, LicenceStore, adapterFor,
 } from '@huloglobal/vendure-licence-sdk';
-import { ModuleRef } from '@nestjs/core';
+import { APP_INTERCEPTOR, ModuleRef } from '@nestjs/core';
+import * as vendureCore from '@vendure/core';
 
 import { CheckoutGuardService, PLUGIN_ID } from './checkout-guard.service';
 import { CheckoutGuardLicenceController } from './licence.controller';
@@ -14,12 +15,21 @@ import {
 import {
     bankTransferPaymentHandler, bankTransferEligibilityChecker, BankTransferController, BankTransferService,
     BankTransferCrons, setBankTransferRuntime, getBankTransferRuntime, normaliseStripeBankTransferOptions, StripeBankTransferOptions,
+    BankTransferEmailSubscriber, setBankEmailRuntime,
 } from './bank-transfer';
 import {
     registerCheckoutGuardCustomFields, trustedClientIpMiddleware, shopApiMutationRateLimitMiddleware,
     SessionHashSubscriber, TrustedClientIpOptions, MutationRateLimitOverrides, setCounterSink,
-    CardTestingOptions, setFailureLookup, setCardTestingBlockListener,
+    CardTestingOptions, setFailureLookup, setCardTestingBlockListener, CardTestingGate, DEFAULT_CARD_TESTING,
+    resolveCardTestingOptions, setCardTestingBlockStore, IpBlockService, CheckoutGuardGraphqlInterceptor, setGraphqlGuardRuntime,
+    OrderClientIpSubscriber, OrderClientIpOptions, registerOrderClientIpField, orderClientIpField, setOrderClientIpRuntime,
+    readOrderClientIp, LimiterStoreKind, DatabaseLimiterBackend, CacheLimiterBackend, ensureRateTable, setLimiterBackends, currentLimiterStore,
 } from './guards';
+import { SettingsService } from './settings/settings.service';
+import { CheckoutGuardSettingsController } from './settings/settings.controller';
+import {
+    AdminSettings, HoldSourcesOptions, LoginGuardOptions, OrderLookupLimitOptions, bankEmailsEnabled, mergeAdminSettings,
+} from './settings/admin-settings';
 import {
     ObservabilityController, ObservabilityService, OpsAlertService, CounterService, ReconciliationService,
     AmountDriftSubscriber, BankExpirySubscriber, configureObservability, ObservabilityOpsOptions,
@@ -41,16 +51,33 @@ export interface CheckoutGuardPluginOptions {
     stripe?: StripeHoldOptions & { webhookSecret?: string };
     /** Bank transfer expiry (default 7 days) and reminder (default 3 days). `stripe: { enabled: true }`
      *  (opt-in) gives GBP orders the customer's Stripe virtual account and reference instead of the
-     *  payment method's own details, and settles them when Stripe receives the money. See the README. */
-    bankTransfer?: { expiryDays?: number; reminderAfterDays?: number; stripe?: StripeBankTransferOptions };
-    /** Nightly Stripe ↔ Vendure reconciliation (premium). */
-    reconciliation?: { enabled?: boolean; lookbackDays?: number };
+     *  payment method's own details, and settles them when Stripe receives the money. `emails: true`
+     *  (premium, opt-in) sends the reminder and expiry e-mails to the customer. See the README. */
+    bankTransfer?: { expiryDays?: number; reminderAfterDays?: number; stripe?: StripeBankTransferOptions; emails?: boolean };
+    /** Nightly Stripe ↔ Vendure reconciliation (premium). `amountDrift: true` (opt-in) also flags known
+     *  intents whose Stripe amount differs from the Vendure payment. */
+    reconciliation?: { enabled?: boolean; lookbackDays?: number; amountDrift?: boolean };
     /** Trusted client-IP contract for server-side proxies. */
     trustedClientIp?: TrustedClientIpOptions;
-    /** Token-bucket limits for Shop API mutations, keyed by client IP. */
-    rateLimits?: { mutations?: MutationRateLimitOverrides };
-    /** Card-testing gate: failed-attempt caps per IP and per order (default on; `false` disables). */
-    cardTesting?: CardTestingOptions | false;
+    /** Limits for Shop API mutations, keyed by client connection. `store` (default `memory`):
+     *  `database` or `cache` share the counters across processes and restarts. */
+    rateLimits?: { mutations?: MutationRateLimitOverrides; store?: LimiterStoreKind };
+    /** Card-testing gate: failed-attempt caps per IP and per order (default on; `false` disables).
+     *  `autoOrderGate: true` (opt-in) refuses card payment mutations on an order past the cap
+     *  without the host's Stripe hook. */
+    cardTesting?: (CardTestingOptions & { autoOrderGate?: boolean }) | false;
+    /** Login brute-force guard for the Admin and Shop API `login` / `authenticate` mutations (opt-in). */
+    loginGuard?: LoginGuardOptions;
+    /** Shop API `orderByCode` lookups per client connection (opt-in). */
+    orderLookup?: OrderLookupLimitOptions;
+    /** Store the shopper's client IP on the order (opt-in; registers Order custom field `cgClientIp`
+     *  unless `fieldName` names one the host already has). Needs a migration with `synchronize: false`. */
+    orderClientIp?: boolean | OrderClientIpOptions;
+    /** Premium hold sources besides Stripe holds: HULO Payments for Vendure manual-capture payments. */
+    holds?: HoldSourcesOptions;
+    /** Admin Settings tab may override these options (default `true`). `false`: the tab is read-only
+     *  and stored overrides are ignored. */
+    adminSettings?: boolean;
     /** Where alerts go: Slack / Discord / Teams / Telegram / signed webhook / email. */
     ops?: ObservabilityOpsOptions;
     /** Anonymous `orderByCode` window for the session-bound strategy (default `2h`). */
@@ -71,7 +98,21 @@ const REVOCATION_URL = process.env.HULO_LICENCE_REVOCATION_URL
     || 'https://elite.charity/licence/revoked.json';
 
 let cachedOptions: CheckoutGuardPluginOptions = { publicBaseUrl: 'http://localhost:3000' };
-export function getOptions(): CheckoutGuardPluginOptions { return cachedOptions; }
+let adminOverrides: AdminSettings = {};
+let effectiveOptions: CheckoutGuardPluginOptions = cachedOptions;
+/** Effective options: the `init()` options with the admin's saved settings on top. */
+export function getOptions(): CheckoutGuardPluginOptions { return effectiveOptions; }
+/** The `init()` options exactly as the host passed them (the defaults the Settings tab starts from). */
+export function getInitOptions(): CheckoutGuardPluginOptions { return cachedOptions; }
+/** The admin's saved overrides in force. */
+export function getAdminOverrides(): AdminSettings { return adminOverrides; }
+function recomputeOptions(): void {
+    effectiveOptions = cachedOptions.adminSettings === false ? cachedOptions : mergeAdminSettings(cachedOptions as any, adminOverrides) as CheckoutGuardPluginOptions;
+}
+
+/** One card-testing gate shared by the Shop API middleware and the admin blocked list. */
+const cardTestingGate = new CardTestingGate(DEFAULT_CARD_TESTING);
+export function getCardTestingGate(): CardTestingGate { return cardTestingGate; }
 
 /**
  * `@huloglobal/vendure-plugin-checkout-guard`
@@ -90,13 +131,15 @@ export function getOptions(): CheckoutGuardPluginOptions { return cachedOptions;
  */
 @VendurePlugin({
     imports: [PluginCommonModule],
-    controllers: [CheckoutGuardLicenceController, StripeHoldController, BankTransferController, ObservabilityController],
+    controllers: [CheckoutGuardLicenceController, CheckoutGuardSettingsController, StripeHoldController, BankTransferController, ObservabilityController],
     providers: [
         CheckoutGuardService,
         StripeHoldService, StripeHoldCron,
         BankTransferService, BankTransferCrons,
         SessionHashSubscriber,
         ObservabilityService, OpsAlertService, CounterService, ReconciliationService, AmountDriftSubscriber, BankExpirySubscriber,
+        SettingsService, IpBlockService, OrderClientIpSubscriber, BankTransferEmailSubscriber,
+        { provide: APP_INTERCEPTOR, useClass: CheckoutGuardGraphqlInterceptor },
     ],
     compatibility: '>=3.5.0 <4.0.0',
     configuration: (config: RuntimeVendureConfig) => {
@@ -109,15 +152,22 @@ export function getOptions(): CheckoutGuardPluginOptions { return cachedOptions;
         const checkers = config.paymentOptions.paymentMethodEligibilityCheckers || [];
         if (!checkers.some(c => c.code === bankTransferEligibilityChecker.code)) checkers.push(bankTransferEligibilityChecker);
         config.paymentOptions.paymentMethodEligibilityCheckers = checkers;
-        // Order custom field for the session-bound lookup.
+        // Order custom field for the session-bound lookup, and (opt-in) the client IP.
         registerCheckoutGuardCustomFields(config);
+        registerOrderClientIpField(config, getInitOptions().orderClientIp);
         // Middleware: raw body for the Stripe webhook, trusted client IP, mutation rate limits.
         config.apiOptions.middleware = [
             ...(config.apiOptions.middleware || []),
             stripeHoldRawBodyMiddlewareRegistration,
             trustedClientIpMiddleware(options.trustedClientIp),
             shopApiMutationRateLimitMiddleware(
-                { limits: options.rateLimits?.mutations, clientIp: options.trustedClientIp, cardTesting: options.cardTesting },
+                {
+                    limits: options.rateLimits?.mutations, clientIp: options.trustedClientIp, cardTesting: options.cardTesting,
+                    // Re-read on every request so the admin Settings tab applies without a restart.
+                    getLimits: () => getOptions().rateLimits?.mutations,
+                    getCardTesting: () => getOptions().cardTesting,
+                    gate: cardTestingGate,
+                },
                 config.apiOptions.shopApiPath,
             ),
         ];
@@ -196,6 +246,7 @@ export class CheckoutGuardPlugin {
      *  pieces (usage stats, weekly report on the worker). */
     async onApplicationBootstrap() {
         CheckoutGuardPlugin.wireRuntimes(this.moduleRef);
+        await this.startSharedState();
         if (!CheckoutGuardPlugin.licenceStatus?.valid) {
             try {
                 const store = new LicenceStore((sql, params, opts) => adapterFor(this.connection.rawConnection).query(sql, params, opts));
@@ -218,15 +269,57 @@ export class CheckoutGuardPlugin {
                 hasPremiumAccess: () => CheckoutGuardPlugin.hasPremiumAccess(),
             });
             CheckoutGuardPlugin.setStatsProvider(() => service.evalStats());
-            if (this.processContext.isWorker) digest.start();
+            // The weekly report is premium (0.4.0): the loop only ticks while premium is active.
+            if (this.processContext.isWorker) service.startDigestLoop(digest);
         } catch (e: any) {
             Logger.warn(`Engagement setup skipped: ${e?.message || e}`, 'CheckoutGuard');
         }
     }
 
+    /** Admin settings, the shared limiter store and the shared block list. Fail-soft. */
+    private async startSharedState(): Promise<void> {
+        const db = () => adapterFor(this.connection.rawConnection);
+        try {
+            await ensureRateTable(db());
+        } catch (e: any) {
+            Logger.warn(`Rate-limit table not created (${e?.message || e}); the database store falls back to memory`, 'CheckoutGuard');
+        }
+        let cache: CacheLimiterBackend | undefined;
+        try {
+            const CacheService = (vendureCore as any).CacheService;
+            const svc = CacheService ? this.moduleRef.get(CacheService, { strict: false }) : null;
+            if (svc) cache = new CacheLimiterBackend(svc);
+        } catch { cache = undefined; }
+        setLimiterBackends({ database: new DatabaseLimiterBackend(db), cache }, () => getOptions().rateLimits?.store || 'memory');
+        try {
+            const blocks = this.moduleRef.get(IpBlockService, { strict: false });
+            await blocks.ensureTable();
+            setCardTestingBlockStore(blocks, () => currentLimiterStore() !== 'memory');
+        } catch (e: any) {
+            Logger.warn(`Blocked-connection table not created (${e?.message || e}); blocks stay per process`, 'CheckoutGuard');
+        }
+        if (getInitOptions().adminSettings === false) return;
+        try {
+            const settings = this.moduleRef.get(SettingsService, { strict: false });
+            await settings.start(next => CheckoutGuardPlugin.applyAdminSettings(next, this.moduleRef));
+        } catch (e: any) {
+            Logger.warn(`Admin settings not loaded (${e?.message || e}); the code's options apply`, 'CheckoutGuard');
+        }
+    }
+
+    /** Apply saved admin settings over the init options and re-wire the runtimes. */
+    static applyAdminSettings(next: AdminSettings, moduleRef?: ModuleRef): void {
+        adminOverrides = next || {};
+        recomputeOptions();
+        CheckoutGuardPlugin.wireRuntimes(moduleRef ?? CheckoutGuardPlugin.moduleRefInternal ?? undefined);
+    }
+
+    private static moduleRefInternal: ModuleRef | null = null;
+
     /** Feature modules never import this class; they read options and the
      *  premium flag through small runtime objects installed here. */
     private static wireRuntimes(moduleRef?: ModuleRef): void {
+        if (moduleRef) CheckoutGuardPlugin.moduleRefInternal = moduleRef;
         const options = getOptions();
         const premium = () => CheckoutGuardPlugin.hasPremiumAccess();
         let ops: OpsAlertService | null = null;
@@ -238,7 +331,7 @@ export class CheckoutGuardPlugin {
         if (counters) { const c = counters; setCounterSink(name => c.bump(name)); }
         if (events) {
             const e = events;
-            setFailureLookup((ip, windowMinutes) => e.countRecentFailures(ip, windowMinutes));
+            setFailureLookup((ip, windowMinutes, since) => e.countRecentFailures(ip, windowMinutes, since));
         }
         setCardTestingBlockListener(info => {
             if (!ops) return;
@@ -248,13 +341,26 @@ export class CheckoutGuardPlugin {
                 detail: { ip: info.ip, failures: info.failures, blockedUntil: info.blockedUntil.toISOString(), mutation: info.mutation },
             } as any);
         });
+        const ipField = orderClientIpField(getInitOptions().orderClientIp);
+        let connection: TransactionalConnection | null = null;
+        try { connection = moduleRef?.get(TransactionalConnection, { strict: false }) ?? null; } catch { connection = null; }
+        setOrderClientIpRuntime({ field: () => ipField, clientIp: () => getOptions().trustedClientIp || {} });
         configureStripeHold({
-            getOptions: () => options.stripe || {},
+            getOptions: () => getOptions().stripe || {},
             hasPremiumAccess: premium,
             notifyOps: async ev => { if (ops) void ops.alert(ev as any); },
             recordPaymentEvent: async ev => { if (events) await events.recordPaymentEvent(ev as any); },
             // Stripe bank transfers share the hold webhook and need payment_intent.succeeded on it.
             acknowledgeNonHoldEventsWhileLocked: () => !!getBankTransferRuntime().stripe,
+            holdSources: () => ({
+                huloPayments: getOptions().holds?.huloPayments === true,
+                huloPaymentsSafetyCapture: getOptions().holds?.huloPaymentsSafetyCapture === true,
+            }),
+            orderClientIp: async (orderCode: string) => {
+                if (!ipField || !connection || !orderCode) return null;
+                const order = await connection.rawConnection.getRepository(vendureCore.Order).findOne({ where: { code: orderCode } });
+                return readOrderClientIp(order);
+            },
         });
         setBankTransferRuntime({
             expiryDays: options.bankTransfer?.expiryDays,
@@ -263,7 +369,33 @@ export class CheckoutGuardPlugin {
             stripe: normaliseStripeBankTransferOptions(options.bankTransfer?.stripe),
             notifyOps: async ev => { if (ops) void ops.alert(ev); },
         });
-        configureObservability({ getOptions: () => options, hasPremiumAccess: premium });
+        setBankEmailRuntime({
+            enabled: () => bankEmailsEnabled(getOptions().bankTransfer?.emails),
+            hasPremiumAccess: premium,
+            send: async (to, mail) => {
+                if (!ops) throw new Error('mail transport not ready');
+                await ops.sendMail(to, mail);
+            },
+            storeName: () => (getOptions().publicBaseUrl || '').replace(/^https?:\/\//, '').replace(/\/.*$/, ''),
+        });
+        configureObservability({ getOptions: () => getOptions(), hasPremiumAccess: premium });
+        setGraphqlGuardRuntime({
+            loginGuard: () => getOptions().loginGuard,
+            orderLookup: () => getOptions().orderLookup,
+            autoOrderGate: () => {
+                const ct = getOptions().cardTesting;
+                if (!ct || ct.autoOrderGate !== true) return null;
+                return resolveCardTestingOptions(ct);
+            },
+            clientIp: () => getOptions().trustedClientIp || {},
+            countOrderFailures: async (orderCode, windowMinutes) => events ? events.countRecentFailuresForOrder(orderCode, windowMinutes) : 0,
+            onLoginLockout: info => {
+                let blocks: IpBlockService | null = null;
+                try { blocks = moduleRef?.get(IpBlockService, { strict: false }) ?? CheckoutGuardPlugin.moduleRefInternal?.get(IpBlockService, { strict: false }) ?? null; } catch { blocks = null; }
+                void blocks?.save({ ip: info.ip, failures: info.failures, blockedAt: new Date(), blockedUntil: info.until, surface: `login:${info.api}` });
+                if (ops) void ops.alert({ event: 'security.login_lockout', text: `Login guard: ${info.api} logins from ${info.ip} refused until ${info.until.toISOString()} after ${info.failures} failed attempts.`, detail: { ip: info.ip, api: info.api, failures: info.failures } } as any);
+            },
+        });
     }
 
     private static revocation: RevocationChecker | null = null;
@@ -278,6 +410,7 @@ export class CheckoutGuardPlugin {
 
     static init(options: CheckoutGuardPluginOptions): Type<CheckoutGuardPlugin> {
         cachedOptions = { ...options };
+        recomputeOptions();
         warnIfIncompatibleVendure({
             pluginPackageName: PKG_NAME,
             pluginPackageVersion: PKG_VERSION,
@@ -308,8 +441,8 @@ export class CheckoutGuardPlugin {
             // eslint-disable-next-line no-console
             console.warn(
                 `[${PKG_NAME}] ${status.message}` +
-                ` — Running in FREE tier after the 14-day evaluation: session-bound order lookup, trusted client IP, rate limits, funnel and the bank-transfer handler stay on;` +
-                ` Stripe holds, bank-transfer expiry, failed-payment log, reconciliation, drift guard and ops alerts need a licence. Buy at https://elite.charity/licence/buy/${PLUGIN_ID}`,
+                ` — Running in FREE tier after the 14-day evaluation: the Stripe hold list with capture and release, session-bound order lookup, trusted client IP, rate limits, the card-testing and login guards, the decline log, funnel and the bank-transfer handler stay on;` +
+                ` auto/safety capture, bank-transfer expiry and e-mails, reconciliation, drift guard, ops alerts and the weekly report need a licence. Buy at https://elite.charity/licence/buy/${PLUGIN_ID}`,
             );
         }
         if (!CheckoutGuardPlugin.heartbeat) {

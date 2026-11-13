@@ -9,7 +9,7 @@ import {
 } from './hold-utils';
 import { effectiveStripeHoldOptions, getStripeHoldRuntime, notifyOpsSafe, recordPaymentEventSafe, StripeHoldOpsEvent } from './runtime';
 import { retrievePaymentIntent, type StripePaymentIntentLike } from './stripe-api';
-import { getHoldMethodCodes, getHoldPaymentMethodForChannel, getStripeKeyForChannelId } from './stripe-key';
+import { getHoldMethodCodes, getHoldPaymentMethodForChannel, getHuloPaymentsMethodCodes, getStripeKeyForChannelId } from './stripe-key';
 
 const loggerCtx = 'CheckoutGuard:StripeHold';
 
@@ -28,6 +28,8 @@ export interface HoldSummary {
     expiresAt: string;
     /** True once the safety cron would capture it on its next run. */
     due: boolean;
+    /** `stripe-hold` (Checkout Guard's own Stripe holds) or `hulo-payments` (premium source). */
+    source?: 'stripe-hold' | 'hulo-payments';
 }
 
 export interface HoldActionResult {
@@ -75,13 +77,38 @@ export class StripeHoldService {
 
     // ── Premium gate ─────────────────────────────────────────────────────
 
+    /** Premium is needed only for the automation around holds: auto-capture below a threshold,
+     *  the safety capture and HULO Payments hold sources. Recording, listing, capture and
+     *  release are free (0.4.0). */
     premium(): boolean {
         const ok = getStripeHoldRuntime().hasPremiumAccess();
         if (!ok && !this.premiumWarned) {
             this.premiumWarned = true;
-            Logger.warn('Stripe holds are a premium feature — add a licence key (or start the 14-day trial) to enable webhook handling, capture/cancel and safety capture.', loggerCtx);
+            Logger.info('Stripe holds are recorded and can be captured or released on the free tier; auto-capture, the safety capture and HULO Payments holds need a licence (or the 14-day evaluation).', loggerCtx);
         }
         return ok;
+    }
+
+    /** Hold sources in force: Stripe holds always; HULO Payments holds with premium and the `holds.huloPayments` option. */
+    private huloPaymentsOn(): { list: boolean; safety: boolean } {
+        const src = getStripeHoldRuntime().holdSources?.() ?? { huloPayments: false, huloPaymentsSafetyCapture: false };
+        const on = !!src.huloPayments && getStripeHoldRuntime().hasPremiumAccess();
+        return { list: on, safety: on && !!src.huloPaymentsSafetyCapture };
+    }
+
+    /** Method codes whose Authorized payments are holds this install manages. */
+    private async holdCodes(opts: { forSafetyCapture?: boolean } = {}): Promise<{ codes: string[]; hulo: Set<string> }> {
+        const codes = await getHoldMethodCodes(this.connection);
+        const on = this.huloPaymentsOn();
+        const want = opts.forSafetyCapture ? on.safety : on.list;
+        const hulo = want ? new Set(await getHuloPaymentsMethodCodes(this.connection).catch(() => [] as string[])) : new Set<string>();
+        return { codes: [...codes, ...[...hulo].filter(c => !codes.includes(c))], hulo };
+    }
+
+    /** A HULO Payments payment is a hold only when it was authorised for manual capture. */
+    private isManagedHold(p: Payment, hulo: Set<string>): boolean {
+        if (!hulo.has(p.method)) return true;
+        return (p.metadata as any)?.capture === 'manual';
     }
 
     // ── Context helpers (same shape as @vendure/payments-plugin) ─────────
@@ -127,25 +154,6 @@ export class StripeHoldService {
         if (!meta) {
             Logger.verbose(`Stripe event ${type} for ${pi.id} carries no Vendure metadata, skipped`, loggerCtx);
             return { status: 200, message: 'Event has no Vendure metadata, skipped' };
-        }
-        if (!this.premium()) {
-            // With Stripe bank transfers on, the endpoint also receives events
-            // for ordinary card payments. None of them is a hold to record (and
-            // the failed-payment log is premium), so they are acknowledged
-            // rather than retried for days, which could get the endpoint disabled.
-            if (pi.capture_method !== 'manual' && getStripeHoldRuntime().acknowledgeNonHoldEventsWhileLocked?.()) {
-                Logger.verbose(`Stripe event ${type} for ${pi.id} is not a hold; acknowledged while premium is locked`, loggerCtx);
-                return { status: 200, message: `Event ${type} is not for a hold; ignored while Checkout Guard premium is locked` };
-            }
-            // Not 200: Stripe keeps retrying (with back-off, for days) so the
-            // hold is attached as soon as a licence is active again.
-            const now = Date.now();
-            if (now - StripeHoldService.lastLockedAlertAt > 60 * 60 * 1000) {
-                StripeHoldService.lastLockedAlertAt = now;
-                Logger.error(`Stripe hold ${pi.id} for order ${meta.orderCode} NOT recorded — Checkout Guard premium is locked; answering 503 so Stripe retries`, loggerCtx);
-                await notifyOpsSafe({ event: 'hold.webhook_error', text: `Stripe hold ${pi.id} for order ${meta.orderCode} NOT recorded — Checkout Guard premium is locked (licence missing or expired). Stripe will retry; activate a licence.`, orderCode: meta.orderCode, paymentIntentId: pi.id });
-            }
-            return { status: 503, message: 'Checkout Guard premium locked — retry later' };
         }
         switch (type) {
             case 'payment_intent.amount_capturable_updated':
@@ -284,7 +292,8 @@ export class StripeHoldService {
                 const { autoCaptureBelowMinor } = effectiveStripeHoldOptions();
                 if (payment && settleAfterCommit === 'captured') {
                     pending = { paymentId: payment.id, held, currency: result.currencyCode, reason: 'captured' };
-                } else if (payment && Number.isFinite(Number(autoCaptureBelowMinor)) && held < Number(autoCaptureBelowMinor)) {
+                } else if (payment && Number.isFinite(Number(autoCaptureBelowMinor)) && held < Number(autoCaptureBelowMinor) && this.premium()) {
+                    // Auto-capture is premium automation; on the free tier the hold waits in the list.
                     // Settled AFTER the commit: the Stripe capture call must not
                     // run while this transaction holds the order row lock.
                     pending = { paymentId: payment.id, held, currency: result.currencyCode, reason: 'auto' };
@@ -355,8 +364,11 @@ export class StripeHoldService {
         const message = err?.message || 'unknown error';
         const code = err?.decline_code || err?.code || undefined;
         Logger.warn(`Payment for order ${meta.orderCode} failed: ${message}${code ? ` (${code})` : ''}`, loggerCtx);
+        // With the opt-in order client IP, a webhook decline counts against the shopper's IP too.
+        let ip: string | null = null;
+        try { ip = (await getStripeHoldRuntime().orderClientIp?.(meta.orderCode)) ?? null; } catch { ip = null; }
         await recordPaymentEventSafe({
-            kind: 'failed', provider: 'stripe', providerRef: pi.id, code, message,
+            kind: 'failed', provider: 'stripe', providerRef: pi.id, code, message, ip,
             amountMinor: Number.isFinite(Number(pi.amount)) ? fromStripeMinorUnits(Number(pi.amount), pi.currency) : undefined,
             currency: pi.currency ? pi.currency.toUpperCase() : undefined,
             orderCode: meta.orderCode, orderId: meta.orderId, channelId: channel?.id,
@@ -425,7 +437,7 @@ export class StripeHoldService {
 
     /** Authorized hold payments visible in the ctx channel. */
     async listHolds(ctx: RequestContext, opts: { includeDue?: boolean } = {}): Promise<HoldSummary[]> {
-        const codes = await getHoldMethodCodes(this.connection);
+        const { codes, hulo } = await this.holdCodes();
         if (!codes.length) return [];
         const qb = this.connection.getRepository(ctx, Payment).createQueryBuilder('p')
             .leftJoinAndSelect('p.order', 'o')
@@ -440,7 +452,8 @@ export class StripeHoldService {
         const chan = String(ctx.channelId ?? '');
         return rows
             .filter(p => !chan || (p.order?.channels || []).some(ch => String(ch.id) === chan))
-            .map(p => this.toSummary(p, safetyCaptureDays, now))
+            .filter(p => this.isManagedHold(p, hulo))
+            .map(p => ({ ...this.toSummary(p, safetyCaptureDays, now), source: hulo.has(p.method) ? 'hulo-payments' as const : 'stripe-hold' as const }))
             .filter(s => opts.includeDue === undefined ? true : (opts.includeDue ? s.due : !s.due));
     }
 
@@ -472,10 +485,10 @@ export class StripeHoldService {
     }
 
     private async loadHold(ctx: RequestContext, paymentId: ID): Promise<{ payment?: Payment; error?: string }> {
-        const codes = await getHoldMethodCodes(this.connection);
+        const { codes, hulo } = await this.holdCodes();
         const payment = await this.connection.getRepository(ctx, Payment).findOne({ where: { id: paymentId } as any, relations: ['order', 'order.channels'] });
         if (!payment) return { error: 'payment_not_found' };
-        if (!codes.includes(payment.method)) return { error: 'not_a_stripe_hold' };
+        if (!codes.includes(payment.method) || !this.isManagedHold(payment, hulo)) return { error: 'not_a_stripe_hold' };
         const chan = String(ctx.channelId ?? '');
         if (chan && !(payment.order?.channels || []).some(ch => String(ch.id) === chan)) return { error: 'payment_not_found' };
         return { payment };
@@ -570,7 +583,7 @@ export class StripeHoldService {
     async safetyCapture(now: Date = new Date()): Promise<SafetyCaptureReport> {
         const report: SafetyCaptureReport = { scanned: 0, captured: 0, failed: 0, skipped: 0 };
         if (!this.premium()) return report;
-        const codes = await getHoldMethodCodes(this.connection);
+        const { codes, hulo } = await this.holdCodes({ forSafetyCapture: true });
         if (!codes.length) return report;
         const { safetyCaptureDays } = effectiveStripeHoldOptions();
         const rows = await this.connection.rawConnection.getRepository(Payment).createQueryBuilder('p')
@@ -580,8 +593,9 @@ export class StripeHoldService {
             .andWhere('p.method IN (:...codes)', { codes })
             .orderBy('p.createdAt', 'ASC')
             .getMany();
-        report.scanned = rows.length;
-        for (const p of rows) {
+        const managed = rows.filter(p => this.isManagedHold(p, hulo));
+        report.scanned = managed.length;
+        for (const p of managed) {
             const authorisedAt = p.createdAt instanceof Date ? p.createdAt : new Date(p.createdAt as any);
             const due = holdUntilFromMetadata(p.metadata) || computeHoldUntil(authorisedAt, safetyCaptureDays);
             if (due.getTime() > now.getTime()) { report.skipped++; continue; }

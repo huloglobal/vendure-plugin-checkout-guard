@@ -9,6 +9,7 @@ import { ObservabilityService } from '../src/observability';
 import { buildStripeSignatureHeader, configureStripeHold } from '../src/stripe-hold';
 import { setBankTransferRuntime } from '../src/bank-transfer';
 import { configureObservability } from '../src/observability';
+import { getCardTestingGate } from '../src/plugin';
 
 /**
  * Runs against a real MariaDB (same dialect as production). SKIPPED unless
@@ -51,6 +52,8 @@ run('@huloglobal/vendure-plugin-checkout-guard (MariaDB)', () => {
                 bankTransfer: { expiryDays: 7, reminderAfterDays: 3 },
                 trustedClientIp: { secret: PROXY_SECRET },
                 rateLimits: { mutations: { applyCouponCode: { capacity: 3, windowMs: 60_000 } } },
+                // 0.4.0 opt-in: the shopper's IP on the order (the e2e schema is synchronised).
+                orderClientIp: true,
             }),
         ],
     });
@@ -432,4 +435,173 @@ run('@huloglobal/vendure-plugin-checkout-guard (MariaDB)', () => {
         expect(Array.isArray(list.items)).toBe(true);
         expect(list.premium).toBe(true);
     });
+
+    // ── 0.4.0 parity wave ──────────────────────────────────────────────
+    describe('0.4.0: admin settings, login guard, lookup limit, shared state, tiers', () => {
+        let token = '';
+        let ipSeq = 120;
+        const nextIp = () => `198.51.100.${ipSeq++}`;
+        async function admin(path: string, init: { method?: string; body?: unknown } = {}) {
+            const res = await fetch(`${BASE}/checkout-guard/${path}`, {
+                method: init.method || 'GET',
+                headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+                body: init.body === undefined ? undefined : JSON.stringify(init.body),
+            });
+            let json: any = null;
+            try { json = await res.json(); } catch { /* not JSON */ }
+            return { status: res.status, json };
+        }
+        async function shopAs(ip: string, query: string, variables?: unknown) {
+            const res = await fetch(`${BASE}/shop-api`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'x-real-client-ip': ip, 'x-checkout-guard-proxy': PROXY_SECRET },
+                body: JSON.stringify({ query, variables }),
+            });
+            return { status: res.status, json: await res.json() };
+        }
+        const LOGIN = 'mutation { login(username: "nobody@example.com", password: "wrong") { ... on CurrentUser { id } ... on ErrorResult { errorCode message } } }';
+        const LOOKUP = 'query { orderByCode(code: "NOPE") { id } }';
+
+        beforeAll(async () => {
+            await adminClient.asSuperAdmin();
+            token = (adminClient as any).authToken as string;
+        });
+        afterAll(async () => { await admin('admin-settings/reset', { method: 'POST' }); });
+
+        it('defaults change nothing: guards off, code values in force, anonymous callers refused', async () => {
+            for (const p of ['admin-settings', 'blocked']) expect([401, 403]).toContain((await fetch(`${BASE}/checkout-guard/${p}`)).status);
+            const s = await admin('admin-settings');
+            expect(s.status).toBe(200);
+            expect(s.json.editable).toBe(true);
+            expect(s.json.saved).toEqual({});
+            expect(s.json.effective.loginGuard.enabled).toBe(false);
+            expect(s.json.effective.orderLookup.enabled).toBe(false);
+            expect(s.json.effective.rateLimits.store).toBe('memory');
+            expect(s.json.effective.cardTesting.autoOrderGate).toBe(false);
+            expect(s.json.effective.bankTransfer).toEqual({ expiryDays: 7, reminderAfterDays: 3, emails: false });
+            expect(s.json.effective.rateLimits.mutations.applyCouponCode).toEqual({ capacity: 3, windowMs: 60_000 });
+            const ip = nextIp();
+            for (let i = 0; i < 8; i++) {
+                const r = await shopAs(ip, LOGIN);
+                expect(r.json.data.login.errorCode).toBe('INVALID_CREDENTIALS_ERROR');
+            }
+        });
+
+        it('rejects invalid settings with a field-named message', async () => {
+            const bad = await admin('admin-settings', { method: 'POST', body: { settings: { loginGuard: { maxFailures: -1 } } } });
+            expect(bad.status).toBe(400);
+            expect(bad.json.message).toMatch(/loginGuard.maxFailures/);
+        });
+
+        it('login guard: locks a connection out, lists it as blocked, unblock lifts it', async () => {
+            const saved = await admin('admin-settings', { method: 'POST', body: { settings: { loginGuard: { enabled: true, maxFailures: 2, windowMinutes: 15, apis: 'shop' } } } });
+            expect(saved.status).toBe(200);
+            expect(saved.json.effective.loginGuard).toEqual({ enabled: true, maxFailures: 2, windowMinutes: 15, apis: 'shop' });
+            const ip = nextIp();
+            expect((await shopAs(ip, LOGIN)).json.data.login.errorCode).toBe('INVALID_CREDENTIALS_ERROR');
+            expect((await shopAs(ip, LOGIN)).json.data.login.errorCode).toBe('INVALID_CREDENTIALS_ERROR');
+            await new Promise(r => setTimeout(r, 300));
+            const refused = await shopAs(ip, LOGIN);
+            expect(refused.json.errors?.[0]?.message).toMatch(/Too many failed login attempts/);
+            expect(refused.json.errors?.[0]?.extensions?.code).toBe('RATE_LIMITED');
+            // Another connection is unaffected.
+            expect((await shopAs(nextIp(), LOGIN)).json.data.login.errorCode).toBe('INVALID_CREDENTIALS_ERROR');
+            const blocked = await admin('blocked');
+            expect(blocked.json.items.some((b: any) => b.ip === ip && b.surface === 'login:shop')).toBe(true);
+            const un = await admin('blocked/unblock', { method: 'POST', body: { ip } });
+            expect(un.status).toBe(200);
+            expect((await shopAs(ip, LOGIN)).json.data.login.errorCode).toBe('INVALID_CREDENTIALS_ERROR');
+            expect((await admin('blocked')).json.items.some((b: any) => b.ip === ip)).toBe(false);
+        });
+
+        it('orderByCode lookup limit (opt-in) answers RATE_LIMITED past the cap', async () => {
+            await admin('admin-settings', { method: 'POST', body: { settings: { orderLookup: { enabled: true, capacity: 2, windowSeconds: 60 } } } });
+            const ip = nextIp();
+            expect((await shopAs(ip, LOOKUP)).json.errors?.[0]?.extensions?.code).not.toBe('RATE_LIMITED');
+            expect((await shopAs(ip, LOOKUP)).json.errors?.[0]?.extensions?.code).not.toBe('RATE_LIMITED');
+            const third = await shopAs(ip, LOOKUP);
+            expect(third.json.errors?.[0]?.extensions?.code).toBe('RATE_LIMITED');
+        });
+
+        it('shared limiter store: database mode counts in cg_rate and still limits', async () => {
+            const r = await admin('admin-settings', { method: 'POST', body: { settings: { rateLimits: { store: 'database' } } } });
+            expect(r.json.effective.rateLimits.store).toBe('database');
+            await raw().query('DELETE FROM cg_rate');
+            await startGuestOrder('shared.store@example.com');
+            const ip = nextIp();
+            const statuses: number[] = [];
+            for (let i = 0; i < 5; i++) {
+                const res = await fetch(`${BASE}/shop-api`, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json', authorization: `Bearer ${(shopClient as any).authToken}`, 'x-real-client-ip': ip, 'x-checkout-guard-proxy': PROXY_SECRET },
+                    body: JSON.stringify({ query: 'mutation { applyCouponCode(couponCode: "NOPE") { ... on Order { id } ... on ErrorResult { errorCode } } }' }),
+                });
+                statuses.push(res.status);
+            }
+            expect(statuses.slice(0, 3)).toEqual([200, 200, 200]);
+            expect(statuses.slice(3)).toEqual([429, 429]);
+            const [row] = await raw().query('SELECT COUNT(*) AS n, MAX(n) AS top FROM cg_rate');
+            expect(Number(row.n)).toBeGreaterThan(0);
+            expect(Number(row.top)).toBe(5);
+            const s = await admin('admin-settings');
+            expect(s.json.limiterStoreInUse).toBe('database');
+        });
+
+        it('stores the shopper IP on the order at ArrangingPayment (opt-in orderClientIp)', async () => {
+            const order = await startGuestOrder('client.ip@example.com');
+            let ip: string | null = null;
+            for (let i = 0; i < 20 && !ip; i++) {
+                const [row] = await raw().query('SELECT customFieldsCgclientip AS ip FROM `order` WHERE id = ?', [num(order.id)]);
+                ip = row?.ip ?? null;
+                if (!ip) await new Promise(r => setTimeout(r, 100));
+            }
+            expect(ip).toBeTruthy();
+            const s = await admin('admin-settings');
+            expect(s.json.orderClientIpField).toBe('cgClientIp');
+        });
+
+        it('card-testing blocks are stored, listed and unblocked across the shared list', async () => {
+            const gate = getCardTestingGate();
+            const ip = '203.0.113.150';
+            for (let i = 0; i < 4; i++) await obs().recordPaymentEvent({ channelId: 1, kind: 'failed', provider: 'stripe', ip, code: 'card_declined' } as any);
+            expect((await gate.check(ip, 'createStripePaymentIntent')).blocked).toBe(true);
+            await new Promise(r => setTimeout(r, 300));
+            const listed = await admin('blocked');
+            expect(listed.json.items.some((b: any) => b.ip === ip && b.surface === 'createStripePaymentIntent')).toBe(true);
+            const [stored] = await raw().query('SELECT failures FROM cg_ip_block WHERE ip = ?', [ip]);
+            expect(Number(stored.failures)).toBe(4);
+            await admin('blocked/unblock', { method: 'POST', body: { ip } });
+            expect((await gate.check(ip, 'createStripePaymentIntent')).blocked).toBe(false);
+            expect((await admin('blocked/unblock', { method: 'POST', body: { ip: 'not-an-ip' } })).status).toBe(400);
+        });
+
+        it('free tier: hold capture/release never answer 402; checklist and weekly report preview are premium', async () => {
+            configureStripeHold({ hasPremiumAccess: () => false });
+            try {
+                const cap = await admin('holds/999999/capture', { method: 'POST' });
+                expect(cap.status).toBe(404);
+                const rel = await admin('holds/999999/cancel', { method: 'POST' });
+                expect(rel.status).toBe(404);
+            } finally {
+                configureStripeHold({ hasPremiumAccess: () => true });
+            }
+            // No licence and no reachable evaluation server in e2e: the install is on the free tier.
+            const setup = await admin('setup');
+            expect(setup.json).toEqual({ items: [], complete: true, premium: false });
+            expect((await admin('digest/preview')).status).toBe(402);
+            expect((await admin('digest/send-test', { method: 'POST', body: {} })).status).toBe(402);
+            const digest = await admin('digest/settings');
+            expect(digest.json.premium).toBe(false);
+            expect(digest.json.nextDueAt).toBeNull();
+        });
+
+        it('reset returns to the code options', async () => {
+            const r = await admin('admin-settings/reset', { method: 'POST' });
+            expect(r.status).toBe(200);
+            expect(r.json.effective.loginGuard.enabled).toBe(false);
+            expect(r.json.effective.rateLimits.store).toBe('memory');
+            expect((await admin('admin-settings')).json.saved).toEqual({});
+        });
+    });
 });
+

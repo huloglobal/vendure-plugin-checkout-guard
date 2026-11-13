@@ -75,15 +75,22 @@ describe('handleEvent — amount_capturable_updated', () => {
         expect(orders.addPaymentToOrder).not.toHaveBeenCalled();
     });
 
-    it('answers 503 (Stripe retries) and alerts at most hourly while premium is locked', async () => {
+    it('records a hold on the free tier too (0.4.0: the hold list is free)', async () => {
         premium = false;
-        const first = await svc.handleEvent(event('payment_intent.amount_capturable_updated', intent()));
-        expect(first.status).toBe(503);
-        const second = await svc.handleEvent(event('payment_intent.amount_capturable_updated', intent()));
-        expect(second.status).toBe(503);
-        expect(notify).toHaveBeenCalledTimes(1);
-        expect(notify.mock.calls[0][0]).toMatchObject({ event: 'hold.webhook_error', orderCode: 'ORD1', paymentIntentId: 'pi_abc123' });
-        expect(orders.addPaymentToOrder).not.toHaveBeenCalled();
+        const r = await svc.handleEvent(event('payment_intent.amount_capturable_updated', intent()));
+        expect(r).toEqual({ status: 200, message: 'Hold pi_abc123 recorded on order ORD1' });
+        expect(orders.addPaymentToOrder).toHaveBeenCalledTimes(1);
+        await flushAsync();
+        expect(notify.mock.calls[0][0]).toMatchObject({ event: 'hold.authorized', orderCode: 'ORD1' });
+    });
+
+    it('leaves a below-threshold hold for review on the free tier (auto-capture is premium)', async () => {
+        premium = false;
+        options = { safetyCaptureDays: 6, autoCaptureBelowMinor: 20000 };
+        const r = await svc.handleEvent(event('payment_intent.amount_capturable_updated', intent()));
+        expect(r.status).toBe(200);
+        expect(orders.settlePayment).not.toHaveBeenCalled();
+        expect(conn.log).toEqual(['tx:start', 'addPayment', 'tx:end']);
     });
 
     it('records a new hold: live intent checked before the transaction, Authorized payment added, ops alerted after commit', async () => {
@@ -374,3 +381,60 @@ describe('listHolds / safetyCapture', () => {
         expect(await svc.safetyCapture()).toEqual({ scanned: 0, captured: 0, failed: 0, skipped: 0 });
     });
 });
+
+describe('HULO Payments holds (premium, opt-in)', () => {
+    const ctx: any = { apiType: 'admin', channelId: 2, channel: channels[1] };
+    const huloMethod = { id: 3, code: 'hulo-card', enabled: true, handler: { code: 'hulo-stripe', args: [] }, channels: [{ id: 2 }] };
+    const huloBank = { id: 4, code: 'hulo-bank', enabled: true, handler: { code: 'hulo-bank-transfer', args: [] }, channels: [{ id: 2 }] };
+    const order = (id: number) => ({ id: 200 + id, code: `H${id}`, currencyCode: 'GBP', state: 'PaymentAuthorized', channels: [channels[1]] });
+    let sources = { huloPayments: false, huloPaymentsSafetyCapture: false };
+
+    beforeEach(() => {
+        sources = { huloPayments: false, huloPaymentsSafetyCapture: false };
+        configureStripeHold({ holdSources: () => sources });
+        conn.repo(PaymentMethod).rows = [stripeMethod, holdMethod, huloMethod, huloBank];
+        resetMethodsCache(conn as any);
+        const old = new Date(Date.now() - 8 * 86_400_000);
+        conn.repo(Payment).rows = [
+            { id: 1, transactionId: 'pi_h1', state: 'Authorized', method: 'stripe-hold', amount: 100, createdAt: old, metadata: {}, order: order(1) },
+            { id: 2, transactionId: 'pi_h2', state: 'Authorized', method: 'hulo-card', amount: 200, createdAt: old, metadata: { capture: 'manual' }, order: order(2) },
+            { id: 3, transactionId: 'pi_h3', state: 'Authorized', method: 'hulo-card', amount: 300, createdAt: old, metadata: { capture: 'automatic' }, order: order(3) },
+            { id: 4, transactionId: 'bt_4', state: 'Authorized', method: 'hulo-bank', amount: 400, createdAt: old, metadata: {}, order: order(4) },
+        ] as any;
+    });
+    afterEach(() => configureStripeHold({ holdSources: () => ({ huloPayments: false, huloPaymentsSafetyCapture: false }) }));
+
+    it('lists only Stripe holds by default (ELITE keeps 0.3.x behaviour)', async () => {
+        expect((await svc.listHolds(ctx)).map(h => h.paymentId)).toEqual([1]);
+        expect((await svc.capture(ctx, 2)).error).toBe('not_a_stripe_hold');
+    });
+
+    it('adds manual-capture HULO Payments payments when switched on with premium, and captures them', async () => {
+        sources = { huloPayments: true, huloPaymentsSafetyCapture: false };
+        const list = await svc.listHolds(ctx);
+        expect(list.map(h => [h.paymentId, h.source])).toEqual([[1, 'stripe-hold'], [2, 'hulo-payments']]);
+        const r = await svc.capture(ctx, 2);
+        expect(r.ok).toBe(true);
+        expect(orders.settlePayment).toHaveBeenCalledWith(expect.anything(), 2);
+        premium = false;
+        expect((await svc.listHolds(ctx)).map(h => h.paymentId)).toEqual([1]);
+    });
+
+    it('safety-captures HULO Payments holds only with huloPaymentsSafetyCapture', async () => {
+        sources = { huloPayments: true, huloPaymentsSafetyCapture: false };
+        expect((await svc.safetyCapture()).scanned).toBe(1);
+        sources = { huloPayments: true, huloPaymentsSafetyCapture: true };
+        const report = await svc.safetyCapture();
+        expect(report.scanned).toBe(2);
+    });
+});
+
+describe('webhook declines carry the order client IP (opt-in)', () => {
+    it('records the stored IP with the failed event', async () => {
+        configureStripeHold({ orderClientIp: async code => (code === 'ORD1' ? '198.51.100.44' : null) });
+        await svc.handleEvent(event('payment_intent.payment_failed', intent({ status: 'requires_payment_method', last_payment_error: { message: 'declined', code: 'card_declined' } })));
+        expect(record).toHaveBeenCalledWith(expect.objectContaining({ kind: 'failed', ip: '198.51.100.44' }));
+        configureStripeHold({ orderClientIp: async () => null });
+    });
+});
+

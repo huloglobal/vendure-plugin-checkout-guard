@@ -18,11 +18,27 @@ export { GUARDS_LOGGER_CTX } from './constants';
 export { bumpCounter, setCounterSink } from './counters';
 export {
     CardTestingGate, DEFAULT_CARD_TESTING, cardTestingBlockedBody, resolveCardTestingOptions,
-    setCardTestingBlockListener, setFailureLookup,
+    setCardTestingBlockListener, setCardTestingBlockStore, setFailureLookup,
 } from './card-testing';
 export type {
-    CardTestingBlockInfo, CardTestingBlockListener, CardTestingOptions, FailureLookup, ResolvedCardTestingOptions,
+    CardTestingBlock, CardTestingBlockInfo, CardTestingBlockListener, CardTestingBlockStore, CardTestingOptions, FailureLookup, ResolvedCardTestingOptions,
 } from './card-testing';
+export {
+    CacheLimiterBackend, DatabaseLimiterBackend, LIMITER_STORE_KINDS, MemoryLimiterBackend, RATE_TABLE, currentLimiterStore,
+    ensureRateTable, hitFixedWindow, peekFixedWindow, resetFixedWindow, setLimiterBackends,
+} from './limiter-store';
+export type { CacheLike, FixedWindowResult, LimiterBackend, LimiterStoreKind } from './limiter-store';
+export { IpBlockService, IP_BLOCK_TABLE } from './ip-block.service';
+export type { IpBlockRow } from './ip-block.service';
+export {
+    CheckoutGuardGraphqlInterceptor, CheckoutGuardRateLimitError, isFailedLogin, loginRule, setGraphqlGuardRuntime,
+} from './graphql-guard.interceptor';
+export type { GraphqlGuardRuntime } from './graphql-guard.interceptor';
+export {
+    CG_CLIENT_IP_COLUMN, CG_CLIENT_IP_FIELD, OrderClientIpSubscriber, cgClientIpCustomField, orderClientIpField, readOrderClientIp,
+    registerOrderClientIpField, setOrderClientIpRuntime,
+} from './order-client-ip';
+export type { OrderClientIpOptions } from './order-client-ip';
 export type { CounterSink, GuardCounterName } from './counters';
 export {
     CG_SESSION_HASH_COLUMN,
@@ -62,6 +78,7 @@ export {
     countRequestMutationCalls,
     extractMutationNames,
     persistedQueryNotFoundBody,
+    rateLimitBucket,
     rateLimitedBody,
     resolveMutationRateLimits,
     shopApiMutationRateLimitMiddleware,

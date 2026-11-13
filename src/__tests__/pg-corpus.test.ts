@@ -2,6 +2,8 @@ import { readFileSync, readdirSync, statSync } from 'fs';
 import { join, relative } from 'path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDbAdapter, translateSql } from '@huloglobal/vendure-licence-sdk';
+import { DatabaseLimiterBackend, ensureRateTable } from '../guards/limiter-store';
+import { IpBlockService } from '../guards/ip-block.service';
 
 /**
  * Postgres corpus test — runs only when `HULO_PG_URL` points at a scratch
@@ -27,6 +29,8 @@ const CONSTANTS: Record<string, string> = {
     FUNNEL_EVENT_TABLE: 'checkout_guard_funnel_event',
     STATE_TABLE: 'checkout_guard_state',
     COUNTER_TABLE: 'cg_counter',
+    IP_BLOCK_TABLE: 'cg_ip_block',
+    RATE_TABLE: 'cg_rate',
 };
 
 /** `${expr}` → SQL fragment. Unknown expressions fail the test so new call sites are handled deliberately. */
@@ -170,5 +174,32 @@ describe.skipIf(!PG_URL)('Postgres corpus (HULO_PG_URL)', () => {
         console.log(`PG corpus: ${executed}/${ordered.length} statements executed`);
         expect(failures).toEqual([]);
         expect(executed).toBe(ordered.length);
+    });
+
+    it('shared limiter counters and the blocked list behave on PostgreSQL (0.4.0)', async () => {
+        await client.query('SAVEPOINT shared');
+        try {
+            const raw = { options: { type: 'postgres' }, query: (sql: string, params?: any[]) => client.query(sql, params).then((r: any) => r.rows) };
+            const db = createDbAdapter(raw);
+            await ensureRateTable(db);
+            const rate = new DatabaseLimiterBackend(() => db);
+            const exp = Date.now() + 60_000;
+            expect(await rate.incr('b1', 1, exp)).toBe(1);
+            expect(await rate.incr('b1', 2, exp)).toBe(3);
+            expect(await rate.peek('b1')).toBe(3);
+            await rate.reset('b1');
+            expect(await rate.peek('b1')).toBe(0);
+
+            const blocks = new IpBlockService({ rawConnection: raw } as any);
+            await blocks.save({ ip: '203.0.113.9', failures: 5, blockedAt: new Date(), blockedUntil: new Date(Date.now() + 3_600_000), surface: 'createStripePaymentIntent' });
+            const listed = await blocks.listActive();
+            expect(listed.map(b => [b.ip, b.failures, b.surface])).toEqual([['203.0.113.9', 5, 'createStripePaymentIntent']]);
+            await blocks.unblock('203.0.113.9');
+            const after = await blocks.load();
+            expect(after.blocks).toHaveLength(0);
+            expect(after.cleared.has('203.0.113.9')).toBe(true);
+        } finally {
+            await client.query('ROLLBACK TO SAVEPOINT shared');
+        }
     });
 });
