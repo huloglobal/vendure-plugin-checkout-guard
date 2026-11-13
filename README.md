@@ -492,7 +492,7 @@ renewal and reminder e-mails can say what the plugin did.
 
 ## Compatibility
 
-Vendure `>=3.5.0 <4.0.0` (tested on 3.5, 3.6 and 3.7). MySQL, MariaDB and
+Vendure `>=3.5.0 <4.0.0` (tested on 3.5, 3.6, 3.7 and 3.8). MySQL, MariaDB and
 PostgreSQL. Node 20 LTS or newer. Stripe features need
 `@vendure/payments-plugin` Stripe configured with manual capture. REST routes
 live under `/checkout-guard`; see [Endpoints](#endpoints).

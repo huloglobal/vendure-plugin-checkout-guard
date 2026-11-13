@@ -4,11 +4,12 @@ import { Ctx, Permission, RequestContext } from '@vendure/core';
 
 import { BankTransferListStatus, BankTransferService } from './bank-transfer.service';
 import { getBankTransferRuntime } from './bank-transfer-runtime';
+import { isAdminApiSession } from '@huloglobal/vendure-licence-sdk';
 
 /** Order-level permissions: reads need ReadOrder, actions need UpdateOrder. */
 function denyUnlessAdmin(ctx: RequestContext, res: Response, write: boolean): boolean {
     const needed = write ? [Permission.UpdateOrder] : [Permission.ReadOrder];
-    if (!ctx.userHasPermissions(needed)) {
+    if (!isAdminApiSession(ctx) || !ctx.userHasPermissions(needed)) {
         res.status(403).json({ error: 'forbidden' });
         return true;
     }

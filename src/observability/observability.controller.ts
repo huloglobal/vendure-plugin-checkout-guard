@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Post, Query, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { Ctx, Permission, RequestContext } from '@vendure/core';
-import { RateLimiter } from '@huloglobal/vendure-licence-sdk';
+import { RateLimiter, isAdminApiSession } from '@huloglobal/vendure-licence-sdk';
 import { isFunnelStep } from './funnel';
 import { ObservabilityService } from './observability.service';
 import { OpsAlertService } from './ops-alert.service';
@@ -14,7 +14,7 @@ import { FUNNEL_STEPS, PAYMENT_EVENT_KINDS } from './types';
  *  request was rejected (response already sent). */
 function denyUnlessAdmin(ctx: RequestContext, res: Response, write: boolean): boolean {
     const needed = write ? [Permission.UpdateOrder] : [Permission.ReadOrder];
-    if (!ctx.userHasPermissions(needed)) {
+    if (!isAdminApiSession(ctx) || !ctx.userHasPermissions(needed)) {
         res.status(403).json({ error: 'forbidden' });
         return true;
     }

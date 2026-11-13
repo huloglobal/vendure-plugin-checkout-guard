@@ -8,13 +8,14 @@ import type { RequestWithRawBody } from './raw-body.middleware';
 import { effectiveStripeHoldOptions } from './runtime';
 import { StripeSignatureError, verifyStripeSignature } from './stripe-signature';
 import { StripeHoldService } from './stripe-hold.service';
+import { isAdminApiSession } from '@huloglobal/vendure-licence-sdk';
 
 const loggerCtx = 'CheckoutGuard:StripeHold';
 const BUY_URL = 'https://elite.charity/licence/buy/vendure-plugin-checkout-guard';
 
 function denyUnlessAdmin(ctx: RequestContext, res: Response, write: boolean): boolean {
     const needed = write ? [Permission.UpdateOrder] : [Permission.ReadOrder];
-    if (!ctx.userHasPermissions(needed)) {
+    if (!isAdminApiSession(ctx) || !ctx.userHasPermissions(needed)) {
         res.status(403).json({ error: 'forbidden' });
         return true;
     }

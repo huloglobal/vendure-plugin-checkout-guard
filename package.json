@@ -1,6 +1,6 @@
 {
     "name": "@huloglobal/vendure-plugin-checkout-guard",
-    "version": "0.3.0",
+    "version": "0.3.1",
     "description": "The safety layer around Vendure checkout: Stripe manual-capture holds that place the order, bank transfer with expiry, failed and orphaned payment tracking with Stripe reconciliation, session-bound order lookup, checkout rate limits and funnel tracking.",
     "license": "AGPL-3.0-only",
     "author": "Wayne Garrison <wayne@garrison.me.uk>",
@@ -29,7 +29,7 @@
         "test:watch": "vitest"
     },
     "dependencies": {
-        "@huloglobal/vendure-licence-sdk": "^0.15.4"
+        "@huloglobal/vendure-licence-sdk": "^0.15.6"
     },
     "peerDependencies": {
         "@nestjs/common": ">=10.0.0",
@@ -40,12 +40,12 @@
         "typeorm": ">=0.3.0"
     },
     "devDependencies": {
-        "@nestjs/common": "^10.0.0",
-        "@nestjs/core": "^10.0.0",
-        "@nestjs/schedule": "^4.0.0",
+        "@nestjs/common": "^12.0.1",
+        "@nestjs/core": "^12.0.1",
+        "@nestjs/schedule": "^12.0.3",
         "@types/node": "^20.0.0",
         "@types/nodemailer": "^6.4.0",
-        "@vendure/core": "^3.7.3",
+        "@vendure/core": "3.8.2",
         "mysql2": "^3.11.0",
         "nodemailer": "^6.9.0",
         "typescript": "^5.3.0",
