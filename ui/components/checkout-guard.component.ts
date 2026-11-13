@@ -19,6 +19,15 @@ interface HoldRow {
     authorisedAt?: string;
     expiresAt?: string;
     transactionId?: string;
+    source?: 'stripe-hold' | 'hulo-payments';
+}
+
+interface BlockedRow {
+    ip: string;
+    surface: string;
+    failures: number;
+    blockedAt: string;
+    blockedUntil: string;
 }
 
 interface BankRow {
@@ -83,6 +92,7 @@ interface DigestSettings {
     defaultRecipient: string | null;
     lastSentAt: string | null;
     nextDueAt: string | null;
+    premium?: boolean;
 }
 
 /** localStorage flag: the admin hid the (complete) set-up checklist. */
@@ -367,9 +377,12 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                                 <li><span class="status-dot on"></span> Rate limits on coupon, payment and state-transition mutations</li>
                                 <li><span class="status-dot on"></span> Checkout funnel events and browser-side decline reports</li>
                                 <li><span class="status-dot on"></span> Bank-transfer payment method with account details on the order</li>
-                                <li><span class="status-dot" [class.on]="!premiumLocked"></span> Stripe manual-capture holds → Authorized payments, safety capture on day {{ safetyCaptureDays() }} <span class="mini-chip" *ngIf="premiumLocked">licence required</span></li>
-                                <li><span class="status-dot" [class.on]="!premiumLocked"></span> Bank-transfer auto-expiry and reminder events <span class="mini-chip" *ngIf="premiumLocked">licence required</span></li>
-                                <li><span class="status-dot" [class.on]="!premiumLocked"></span> Failed-payment recording, nightly Stripe reconciliation, amount-drift guard, ops alerts <span class="mini-chip" *ngIf="premiumLocked">licence required</span></li>
+                                <li><span class="status-dot on"></span> Stripe manual-capture holds → Authorized payments in the Holds list, with capture and release</li>
+                                <li><span class="status-dot on"></span> Decline log and the card-testing gate (per connection and per order)</li>
+                                <li><span class="status-dot" [class.on]="!!adminSettings?.effective?.loginGuard?.enabled"></span> Login guard for the Admin and Shop API <span class="mini-chip" *ngIf="!adminSettings?.effective?.loginGuard?.enabled">off — Settings</span></li>
+                                <li><span class="status-dot" [class.on]="!premiumLocked"></span> Auto-capture and the safety capture on day {{ safetyCaptureDays() }} <span class="mini-chip" *ngIf="premiumLocked">licence required</span></li>
+                                <li><span class="status-dot" [class.on]="!premiumLocked"></span> Bank-transfer auto-expiry, reminders and customer e-mails <span class="mini-chip" *ngIf="premiumLocked">licence required</span></li>
+                                <li><span class="status-dot" [class.on]="!premiumLocked"></span> Nightly Stripe reconciliation, amount-drift guard, ops alerts, weekly report <span class="mini-chip" *ngIf="premiumLocked">licence required</span></li>
                             </ul>
                         </div>
                     </div>
@@ -404,11 +417,11 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                             <h3 class="step-title">Stripe holds <small>Authorized, not yet captured</small></h3>
                             <button class="gbtn gbtn-outline gbtn-sm" (click)="loadHolds()" [disabled]="holdsLoading">{{ holdsLoading ? 'Loading…' : 'Refresh' }}</button>
                         </div>
-                        <p class="hint">Funds are reserved on the customer's card until you capture or cancel. Stripe releases an authorisation after 7 days; the safety-capture cron captures anything still open after {{ safetyCaptureDays() }} days so the money is never lost. <span *ngIf="premiumLocked" class="warn-inline">Webhook handling and safety capture require a licence — holds listed here were placed while one was active.</span></p>
+                        <p class="hint">Funds are reserved on the customer's card until you capture or cancel. Stripe releases an authorisation after 7 days; with a licence the safety-capture cron captures anything still open after {{ safetyCaptureDays() }} days so the money is never lost. <span *ngIf="premiumLocked" class="warn-inline">Free tier: holds are recorded and you can capture or release them here, but nothing is captured automatically — capture before the authorisation lapses.</span></p>
                         <table class="table" *ngIf="holds.length; else noHolds">
                             <thead>
                                 <tr>
-                                    <th>Order</th><th>Channel</th><th class="num-col">Amount</th><th>Authorised</th><th>Expires</th><th>Stripe</th><th></th>
+                                    <th>Order</th><th>Channel</th><th class="num-col">Amount</th><th>Authorised</th><th>Expires</th><th>Reference</th><th></th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -421,7 +434,7 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                                         <span *ngIf="h.expiresAt" [class.exp-soon]="hoursUntil(h.expiresAt) < 24">{{ h.expiresAt | date: 'd MMM, HH:mm' }} <small>({{ relative(h.expiresAt) }})</small></span>
                                         <span *ngIf="!h.expiresAt">—</span>
                                     </td>
-                                    <td class="mono small">{{ h.transactionId || '—' }}</td>
+                                    <td class="mono small">{{ h.transactionId || '—' }} <span class="mini-chip" *ngIf="h.source === 'hulo-payments'">HULO Payments</span></td>
                                     <td>
                                         <div class="case-actions">
                                             <button class="gbtn gbtn-primary gbtn-sm" (click)="captureHold(h)" [disabled]="busyKey === 'hold:' + h.paymentId">{{ busyKey === 'hold:' + h.paymentId ? 'Working…' : 'Capture' }}</button>
@@ -515,7 +528,7 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                         </div>
                         <p class="hint">
                             <strong>Payment failed</strong> comes from the Stripe webhook; <strong>declined in browser</strong> is reported by the storefront after an inline card decline; <strong>orphaned charge</strong> is a Stripe payment the nightly reconciliation could not match to an order; <strong>amount drift</strong> is a settled payment whose amount differs from the order total.
-                            <span *ngIf="premiumLocked" class="warn-inline">Recording failed payments, reconciliation and the drift guard require a licence — only browser-declined reports are written on the free tier.</span>
+                            <span *ngIf="premiumLocked" class="warn-inline">Declines (webhook and browser) are recorded on every tier; orphans, amount drift and expired holds need a licence.</span>
                         </p>
                         <table class="table" *ngIf="events.length; else noEvents">
                             <thead>
@@ -582,8 +595,116 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
             <vdr-page-block>
                 <div class="card">
                     <div class="card-block">
+                        <div class="row-between">
+                            <h3 class="step-title">Settings <small>{{ adminSettings?.editable === false ? 'managed in code' : 'saved values override vendure-config.ts' }}</small></h3>
+                            <div class="case-actions" *ngIf="form && canEditSettings()">
+                                <button class="gbtn gbtn-outline gbtn-sm" (click)="resetAdminSettings()" [disabled]="settingsSaving">Reset to code defaults</button>
+                                <button class="gbtn gbtn-primary gbtn-sm" (click)="saveAdminSettings()" [disabled]="settingsSaving">{{ settingsSaving ? 'Saving…' : 'Save settings' }}</button>
+                            </div>
+                        </div>
+                        <p class="hint">The plugin options in <code class="mono">vendure-config.ts</code> are the defaults; anything saved here overrides them on every server and worker within a minute, without a restart. Secrets, webhook URLs and the client-IP custom field stay in code. <span *ngIf="adminSettings?.editable === false" class="warn-inline">This install sets <code class="mono">adminSettings: false</code>: the values below are read-only.</span><span *ngIf="adminSettings?.editable !== false && !canEditSettings()" class="warn-inline"> Saving needs the UpdateSettings permission.</span></p>
+                        <ng-container *ngIf="form; else formLoading">
+                            <div class="settings-grid">
+                                <div class="settings-section">
+                                    <div class="subsection-title">Rate limits <small>per client connection</small></div>
+                                    <label class="field-row">Counter store
+                                        <select class="form-input" [(ngModel)]="form.rateLimits.store" [disabled]="!canEditSettings()">
+                                            <option value="memory">Memory (per process)</option>
+                                            <option value="database">Database (shared, survives restarts)</option>
+                                            <option value="cache">Vendure cache / Redis (shared)</option>
+                                        </select>
+                                    </label>
+                                    <p class="hint small" *ngIf="adminSettings?.limiterStoreInUse && adminSettings.limiterStoreInUse !== form.rateLimits.store">In use now: {{ adminSettings.limiterStoreInUse }}.</p>
+                                    <table class="table kv">
+                                        <thead><tr><th>Mutation</th><th>Requests</th><th>Window (s)</th></tr></thead>
+                                        <tbody>
+                                            <tr *ngFor="let m of mutationRows">
+                                                <td class="mono small">{{ m.name }}</td>
+                                                <td><input class="form-input num-input" type="number" min="1" [(ngModel)]="m.capacity" [disabled]="!canEditSettings()"></td>
+                                                <td><input class="form-input num-input" type="number" min="1" [(ngModel)]="m.windowSec" [disabled]="!canEditSettings()"></td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                    <label class="field-row"><input type="checkbox" [(ngModel)]="form.orderLookup.enabled" [disabled]="!canEditSettings()"> Limit <code class="mono">orderByCode</code> lookups</label>
+                                    <div class="field-inline" *ngIf="form.orderLookup.enabled">
+                                        <input class="form-input num-input" type="number" min="1" [(ngModel)]="form.orderLookup.capacity" [disabled]="!canEditSettings()"> per
+                                        <input class="form-input num-input" type="number" min="1" [(ngModel)]="form.orderLookup.windowSeconds" [disabled]="!canEditSettings()"> s
+                                    </div>
+                                </div>
+                                <div class="settings-section">
+                                    <div class="subsection-title">Card-testing gate</div>
+                                    <label class="field-row"><input type="checkbox" [(ngModel)]="form.cardTesting.enabled" [disabled]="!canEditSettings()"> On</label>
+                                    <ng-container *ngIf="form.cardTesting.enabled">
+                                        <label class="field-row">Failed attempts per connection <input class="form-input num-input" type="number" min="0" [(ngModel)]="form.cardTesting.maxFailedPerIp" [disabled]="!canEditSettings()"></label>
+                                        <label class="field-row">Failed attempts per order <input class="form-input num-input" type="number" min="0" [(ngModel)]="form.cardTesting.maxFailedPerOrder" [disabled]="!canEditSettings()"></label>
+                                        <label class="field-row">Counting window (min) <input class="form-input num-input" type="number" min="1" [(ngModel)]="form.cardTesting.windowMinutes" [disabled]="!canEditSettings()"></label>
+                                        <label class="field-row">Block for (min) <input class="form-input num-input" type="number" min="1" [(ngModel)]="form.cardTesting.blockMinutes" [disabled]="!canEditSettings()"></label>
+                                        <label class="field-row"><input type="checkbox" [(ngModel)]="form.cardTesting.autoOrderGate" [disabled]="!canEditSettings()"> Refuse card payments on an order past its cap automatically (no Stripe hook needed; bank transfer is never refused)</label>
+                                    </ng-container>
+                                    <div class="subsection-title" style="margin-top:12px">Login guard</div>
+                                    <label class="field-row"><input type="checkbox" [(ngModel)]="form.loginGuard.enabled" [disabled]="!canEditSettings()"> Refuse logins from a connection after repeated failures</label>
+                                    <ng-container *ngIf="form.loginGuard.enabled">
+                                        <label class="field-row">Failed logins allowed <input class="form-input num-input" type="number" min="1" [(ngModel)]="form.loginGuard.maxFailures" [disabled]="!canEditSettings()"></label>
+                                        <label class="field-row">Window and lockout (min) <input class="form-input num-input" type="number" min="1" [(ngModel)]="form.loginGuard.windowMinutes" [disabled]="!canEditSettings()"></label>
+                                        <label class="field-row">APIs
+                                            <select class="form-input" [(ngModel)]="form.loginGuard.apis" [disabled]="!canEditSettings()">
+                                                <option value="both">Admin and Shop</option><option value="admin">Admin only</option><option value="shop">Shop only</option>
+                                            </select>
+                                        </label>
+                                    </ng-container>
+                                </div>
+                                <div class="settings-section">
+                                    <div class="subsection-title">Holds <small *ngIf="premiumLocked" class="warn-inline">automation needs a licence</small></div>
+                                    <label class="field-row">Safety capture after (days, 1–7) <input class="form-input num-input" type="number" min="1" max="7" [(ngModel)]="form.stripe.safetyCaptureDays" [disabled]="!canEditSettings()"></label>
+                                    <label class="field-row">Auto-capture holds below (minor units, blank = never) <input class="form-input num-input" type="number" min="1" [(ngModel)]="form.stripe.autoCaptureBelowMinor" [disabled]="!canEditSettings()"></label>
+                                    <label class="field-row"><input type="checkbox" [(ngModel)]="form.holds.huloPayments" [disabled]="!canEditSettings()"> List HULO Payments manual-capture payments as holds</label>
+                                    <label class="field-row" *ngIf="form.holds.huloPayments"><input type="checkbox" [(ngModel)]="form.holds.huloPaymentsSafetyCapture" [disabled]="!canEditSettings()"> Safety-capture them too</label>
+                                    <div class="subsection-title" style="margin-top:12px">Bank transfer <small *ngIf="premiumLocked" class="warn-inline">expiry and e-mails need a licence</small></div>
+                                    <label class="field-row">Expire unpaid after (days) <input class="form-input num-input" type="number" min="1" [(ngModel)]="form.bankTransfer.expiryDays" [disabled]="!canEditSettings()"></label>
+                                    <label class="field-row">Remind after (days) <input class="form-input num-input" type="number" min="1" [(ngModel)]="form.bankTransfer.reminderAfterDays" [disabled]="!canEditSettings()"></label>
+                                    <label class="field-row"><input type="checkbox" [(ngModel)]="form.bankTransfer.emails" [disabled]="!canEditSettings()"> E-mail the customer the reminder and the expiry notice (leave off if your shop already sends them)</label>
+                                    <div class="subsection-title" style="margin-top:12px">Reconciliation <small *ngIf="premiumLocked" class="warn-inline">needs a licence</small></div>
+                                    <label class="field-row"><input type="checkbox" [(ngModel)]="form.reconciliation.enabled" [disabled]="!canEditSettings()"> Nightly Stripe reconciliation</label>
+                                    <label class="field-row">Look back (days) <input class="form-input num-input" type="number" min="1" max="30" [(ngModel)]="form.reconciliation.lookbackDays" [disabled]="!canEditSettings()"></label>
+                                    <label class="field-row"><input type="checkbox" [(ngModel)]="form.reconciliation.amountDrift" [disabled]="!canEditSettings()"> Flag payments whose Stripe amount differs from Vendure</label>
+                                </div>
+                            </div>
+                            <p class="hint" *ngIf="adminSettings?.orderClientIpField">Client IP is stored on each order in the <code class="mono">{{ adminSettings.orderClientIpField }}</code> custom field.</p>
+                            <p class="hint" *ngIf="!adminSettings?.orderClientIpField">To store the shopper's IP on each order, set <code class="mono">orderClientIp: true</code> in the plugin options (adds the <code class="mono">cgClientIp</code> custom field; run a migration if <code class="mono">synchronize</code> is off).</p>
+                        </ng-container>
+                        <ng-template #formLoading><p class="hint">{{ adminSettingsError || 'Loading…' }}</p></ng-template>
+                    </div>
+                </div>
+            </vdr-page-block>
+            <vdr-page-block>
+                <div class="card">
+                    <div class="card-block">
+                        <div class="row-between">
+                            <h3 class="step-title">Blocked connections <small>card-testing blocks and login lockouts in force</small></h3>
+                            <button class="gbtn gbtn-outline gbtn-sm" (click)="loadBlocked()" [disabled]="blockedLoading">{{ blockedLoading ? 'Loading…' : 'Refresh' }}</button>
+                        </div>
+                        <table class="table" *ngIf="blocked.length; else noBlocked">
+                            <thead><tr><th>Connection</th><th>Why</th><th class="num-col">Failures</th><th>Since</th><th>Until</th><th></th></tr></thead>
+                            <tbody>
+                                <tr *ngFor="let b of blocked">
+                                    <td class="mono small">{{ b.ip }}</td>
+                                    <td>{{ blockReason(b.surface) }}</td>
+                                    <td class="num-col">{{ b.failures }}</td>
+                                    <td class="nowrap">{{ b.blockedAt | date: 'd MMM, HH:mm' }}</td>
+                                    <td class="nowrap">{{ b.blockedUntil | date: 'd MMM, HH:mm' }}</td>
+                                    <td><button class="gbtn gbtn-outline gbtn-sm" (click)="unblock(b)" [disabled]="busyKey === 'unblock:' + b.ip">{{ busyKey === 'unblock:' + b.ip ? 'Working…' : 'Unblock' }}</button></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <ng-template #noBlocked><p class="hint" *ngIf="!blockedLoading">No connection is blocked. Unblocking one also forgets its earlier failures.</p></ng-template>
+                    </div>
+                </div>
+            </vdr-page-block>
+            <vdr-page-block>
+                <div class="card">
+                    <div class="card-block">
                         <h3 class="step-title">Effective configuration <small>read-only</small></h3>
-                        <p class="hint">Checkout Guard is configured in code — the plugin options in <code class="mono">vendure-config.ts</code> plus a few environment variables. Secrets are never shown here, only whether they are set.</p>
+                        <p class="hint">The rest of Checkout Guard is configured in code — the plugin options in <code class="mono">vendure-config.ts</code> plus a few environment variables. Secrets are never shown here, only whether they are set.</p>
                         <ng-container *ngIf="settingsSections.length; else noSettings">
                             <div class="settings-grid">
                                 <div class="settings-section" *ngFor="let sec of settingsSections">
@@ -616,15 +737,16 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
             <vdr-page-block>
                 <div class="card">
                     <div class="card-block">
-                        <h3 class="step-title">Weekly report <small>Monday 08:00, server time</small></h3>
+                        <h3 class="step-title">Weekly report <small>Monday 08:00, server time</small> <span class="mini-chip" *ngIf="digest && digest.premium === false">licence required</span></h3>
+                        <p class="hint warn-inline" *ngIf="digest && digest.premium === false">The weekly report and the set-up checklist come with a licence or the 14-day evaluation. Your settings are kept; nothing is sent meanwhile.</p>
                         <p class="hint">One e-mail a week with what Checkout Guard did for your store — holds placed and captured, held value, bank transfers confirmed, rate-limited abuse, orphaned charges — and the next set-up step. It is sent through the host's <code class="mono">SMTP_SERVER</code> / <code class="mono">SMTP_USER</code> / <code class="mono">SMTP_PASSWORD</code> settings, the same ones the ops e-mails use.</p>
                         <ng-container *ngIf="digest; else digestLoading">
                             <div class="digest-row">
                                 <label class="digest-toggle"><input type="checkbox" [(ngModel)]="digest.enabled" (ngModelChange)="saveDigest({ enabled: $event })" [disabled]="digestSaving"> Send the weekly report</label>
                                 <input class="form-input" type="email" [(ngModel)]="digestRecipient" [placeholder]="digest.defaultRecipient ? 'Defaults to ' + digest.defaultRecipient : 'Recipient e-mail'" [disabled]="digestSaving" style="min-width:260px">
                                 <button class="gbtn gbtn-outline gbtn-sm" (click)="saveDigest({ recipient: digestRecipient })" [disabled]="digestSaving">{{ digestSaving ? 'Saving…' : 'Save recipient' }}</button>
-                                <button class="gbtn gbtn-primary gbtn-sm" (click)="sendDigestTest()" [disabled]="digestSending">{{ digestSending ? 'Sending…' : 'Send me a test' }}</button>
-                                <button class="gbtn gbtn-outline gbtn-sm" (click)="previewDigest()" [disabled]="digestPreviewing">{{ digestPreviewing ? 'Opening…' : 'Preview' }}</button>
+                                <button class="gbtn gbtn-primary gbtn-sm" (click)="sendDigestTest()" [disabled]="digestSending || digest.premium === false">{{ digestSending ? 'Sending…' : 'Send me a test' }}</button>
+                                <button class="gbtn gbtn-outline gbtn-sm" (click)="previewDigest()" [disabled]="digestPreviewing || digest.premium === false">{{ digestPreviewing ? 'Opening…' : 'Preview' }}</button>
                             </div>
                             <p class="hint">
                                 Last sent {{ digest.lastSentAt ? (digest.lastSentAt | date: 'd MMM yyyy, HH:mm') : 'never' }} · next {{ digest.nextDueAt ? (digest.nextDueAt | date: 'd MMM yyyy, HH:mm') : (digest.enabled ? '—' : 'off') }}
@@ -649,7 +771,9 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                                 <tr><td class="mono small">GET /checkout-guard/bank-transfers · POST …/:paymentId/received | cancel</td><td>Admin</td><td>This page's Bank transfers tab</td></tr>
                                 <tr><td class="mono small">GET /checkout-guard/events · /summary · /funnel/summary</td><td>Admin</td><td>Overview, events and funnel</td></tr>
                                 <tr><td class="mono small">GET /checkout-guard/setup · /widget</td><td>Admin</td><td>Set-up checklist and the dashboard widget</td></tr>
-                                <tr><td class="mono small">GET|POST /checkout-guard/digest/settings · POST …/send-test · GET …/preview</td><td>Admin</td><td>Weekly report</td></tr>
+                                <tr><td class="mono small">GET|POST /checkout-guard/digest/settings · POST …/send-test · GET …/preview</td><td>Admin</td><td>Weekly report (premium)</td></tr>
+                                <tr><td class="mono small">GET|POST /checkout-guard/admin-settings · POST …/reset</td><td>Admin</td><td>The Settings form above (saving needs UpdateSettings)</td></tr>
+                                <tr><td class="mono small">GET /checkout-guard/blocked · POST …/unblock</td><td>Admin</td><td>Blocked connections</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -910,6 +1034,10 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
         .setup-card { border-left: 4px solid var(--gb-amber); }
         .setup-item { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
         .hint-inline { font-size: 12px; color: var(--gb-muted); line-height: 1.45; }
+        .field-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; margin: 6px 0; color: var(--gb-strong); }
+        .field-inline { display: flex; align-items: center; gap: 6px; font-size: 13px; margin: 4px 0 8px 22px; }
+        .num-input { width: 96px; }
+        .hint.small { font-size: 12px; }
         .digest-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0 8px; }
         .digest-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: var(--gb-strong); margin-right: 6px; cursor: pointer; }
 
@@ -960,6 +1088,16 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
     settingsSections: SettingsSection[] = [];
     settingsLoading = false;
     settingsError = '';
+
+    /** Admin-editable settings (Settings tab). */
+    adminSettings: any = null;
+    adminSettingsError = '';
+    form: any = null;
+    mutationRows: Array<{ name: string; capacity: number; windowSec: number }> = [];
+    settingsSaving = false;
+
+    blocked: BlockedRow[] = [];
+    blockedLoading = false;
 
     /** Set-up checklist (Overview). Hidden by the admin only while every item is done. */
     setup: { items: SetupItemRow[]; complete: boolean } | null = null;
@@ -1033,6 +1171,7 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
         this.loadSummary();
         this.loadRecentEvents();
         this.loadSetup();
+        this.loadAdminSettings();
         this.loadTab(this.tab);
     }
 
@@ -1109,6 +1248,8 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
 
     loadSettings() {
         this.loadDigest();
+        this.loadAdminSettings();
+        this.loadBlocked();
         if (this.settings && !this.settingsError) { this.cdr.markForCheck(); return; }
         this.settingsLoading = true;
         this.settingsError = '';
@@ -1124,6 +1265,87 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
                 this.cdr.markForCheck();
             },
         }));
+    }
+
+    // ── Admin settings + blocked list ────────────────────────────────
+
+    loadAdminSettings() {
+        this.adminSettingsError = '';
+        this.subs.add(this.http.get<any>(`${API}/admin-settings`).subscribe({
+            next: r => { this.applyAdminSettings(r); this.cdr.markForCheck(); },
+            error: e => { this.adminSettings = null; this.form = null; this.adminSettingsError = this.errMsg(e, 'Could not load the settings'); this.cdr.markForCheck(); },
+        }));
+    }
+
+    private applyAdminSettings(r: any) {
+        this.adminSettings = r;
+        const eff = r?.effective;
+        if (!eff) { this.form = null; return; }
+        this.form = JSON.parse(JSON.stringify(eff));
+        this.mutationRows = Object.entries(eff.rateLimits?.mutations || {}).map(([name, v]: [string, any]) => ({
+            name, capacity: Number(v?.capacity) || 1, windowSec: Math.max(1, Math.round((Number(v?.windowMs) || 60000) / 1000)),
+        }));
+    }
+
+    canEditSettings(): boolean { return !!this.adminSettings?.canEdit; }
+
+    saveAdminSettings() {
+        if (!this.form || this.settingsSaving) return;
+        const f = this.form;
+        const mutations: Record<string, { capacity: number; windowMs: number }> = {};
+        for (const m of this.mutationRows) mutations[m.name] = { capacity: Number(m.capacity), windowMs: Math.round(Number(m.windowSec) * 1000) };
+        const auto = f.stripe.autoCaptureBelowMinor;
+        const settings = {
+            rateLimits: { store: f.rateLimits.store, mutations },
+            cardTesting: f.cardTesting.enabled ? { ...f.cardTesting } : { enabled: false },
+            loginGuard: { ...f.loginGuard },
+            orderLookup: { ...f.orderLookup },
+            bankTransfer: { ...f.bankTransfer },
+            stripe: { safetyCaptureDays: f.stripe.safetyCaptureDays, autoCaptureBelowMinor: auto === '' || auto === null || auto === undefined ? null : Number(auto) },
+            reconciliation: { ...f.reconciliation },
+            holds: { ...f.holds },
+        };
+        this.settingsSaving = true;
+        this.subs.add(this.http.post<any>(`${API}/admin-settings`, { settings }).subscribe({
+            next: () => { this.settingsSaving = false; this.notification.success('Settings saved'); this.settings = null; this.loadAdminSettings(); this.loadSettings(); this.cdr.markForCheck(); },
+            error: e => { this.settingsSaving = false; this.notification.error(this.errMsg(e, 'Could not save the settings')); this.cdr.markForCheck(); },
+        }));
+    }
+
+    resetAdminSettings() {
+        this.confirm('Reset to the code defaults?', 'Every value saved here is removed; the options in vendure-config.ts apply again.', 'Reset', 'danger').then(ok => {
+            if (!ok) return;
+            this.settingsSaving = true;
+            this.subs.add(this.http.post<any>(`${API}/admin-settings/reset`, {}).subscribe({
+                next: () => { this.settingsSaving = false; this.notification.success('Back to the code defaults'); this.settings = null; this.loadAdminSettings(); this.loadSettings(); this.cdr.markForCheck(); },
+                error: e => { this.settingsSaving = false; this.notification.error(this.errMsg(e, 'Could not reset the settings')); this.cdr.markForCheck(); },
+            }));
+        });
+    }
+
+    loadBlocked() {
+        this.blockedLoading = true;
+        this.subs.add(this.http.get<any>(`${API}/blocked`).subscribe({
+            next: r => { this.blocked = Array.isArray(r?.items) ? r.items : []; this.blockedLoading = false; this.cdr.markForCheck(); },
+            error: () => { this.blocked = []; this.blockedLoading = false; this.cdr.markForCheck(); },
+        }));
+    }
+
+    blockReason(surface: string): string {
+        if (surface === 'login:admin') return 'Failed Admin logins';
+        if (surface === 'login:shop') return 'Failed Shop logins';
+        return `Card testing (${surface || 'payment'})`;
+    }
+
+    unblock(b: BlockedRow) {
+        this.confirm('Unblock this connection?', `${b.ip} can pay and log in again; its earlier failures no longer count.`, 'Unblock', 'primary').then(ok => {
+            if (!ok || this.busyKey) return;
+            this.busyKey = 'unblock:' + b.ip;
+            this.subs.add(this.http.post<any>(`${API}/blocked/unblock`, { ip: b.ip }).subscribe({
+                next: () => { this.busyKey = ''; this.notification.success(`${b.ip} unblocked`); this.loadBlocked(); this.cdr.markForCheck(); },
+                error: e => { this.busyKey = ''; this.notification.error(this.errMsg(e, 'Could not unblock')); this.cdr.markForCheck(); },
+            }));
+        });
     }
 
     // ── Set-up checklist ─────────────────────────────────────────────
@@ -1432,7 +1654,7 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
         const h = this.kpi('holdsPending'); if (h) parts.push(`${h} Stripe hold${h === 1 ? '' : 's'} waiting for capture`);
         const b = this.kpi('bankAwaiting'); if (b) parts.push(`${b} bank transfer${b === 1 ? '' : 's'} awaiting funds`);
         const o = this.kpi('orphansOpen'); if (o) parts.push(`${o} orphaned Stripe charge${o === 1 ? '' : 's'} to investigate`);
-        const tier = this.premiumLocked ? 'Free tier: guards, funnel and bank transfer are active; holds, auto-expiry, reconciliation and alerts are waiting for a licence.' : 'All protections active.';
+        const tier = this.premiumLocked ? 'Free tier: guards, the hold list, the decline log, funnel and bank transfer are active; auto/safety capture, auto-expiry, reconciliation, alerts and the weekly report are waiting for a licence.' : 'All protections active.';
         return parts.length ? `${parts.join(' · ')}. ${tier}` : `Nothing needs attention. ${tier}`;
     }
 
