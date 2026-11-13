@@ -5,6 +5,75 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-11-13
+
+Parity with HULO Checkout Guard for WordPress. **Nothing changes by default for a licensed install**: every new
+guard and every new premium extra is off until it is switched on in the plugin options or the new Settings form,
+and Stripe bank transfers, holds, the card-testing gate and the rate limits behave exactly as in 0.3.1 with the
+same options. On the free tier the tier changes below apply.
+
+### Changed (tiers)
+- **The Stripe hold list with capture and release is free.** The webhook records holds on every tier (it used to
+  answer 503 without a licence so Stripe retried for days), the Holds tab lists them and *Capture* / *Cancel hold*
+  work without a licence (no more 402). Auto-capture below `autoCaptureBelowMinor` and the safety capture stay
+  premium: on the free tier a hold waits for you.
+- **The decline log is free.** `payment_intent.payment_failed` webhooks are recorded as `failed` events on every
+  tier, so the card-testing gate's per-order cap works without a licence. Orphans, amount drift and expired holds
+  stay premium.
+- **The weekly report and the set-up checklist are premium.** Without a licence or the evaluation the report is
+  not sent (`send-test` and `preview` answer 402) and `/checkout-guard/setup` returns no items; a lapsed licence
+  stops them and keeps their settings. The dashboard widget stays free.
+- `PREMIUM_FEATURES` lists what a licence adds now: auto/safety capture, HULO Payments holds, bank-transfer
+  expiry/reminders/e-mails, reconciliation (orphans and amount drift), the drift guard, ops alerts, the weekly
+  report and checklist.
+
+### Added (free)
+- **Admin-editable settings** (*Checkout Guard → Settings*, `GET/POST /checkout-guard/admin-settings`, `POST
+  …/reset`): rate limits and their store, the card-testing gate, the login guard, the `orderByCode` limit,
+  bank-transfer days and e-mails, safety-capture days, auto-capture threshold, reconciliation and hold sources.
+  The `init()` options stay the defaults; saved values (validated, one JSON value in `hulo_plugin_prefs`)
+  override them on every process within a minute; *Reset to code defaults* removes them. Saving needs
+  `UpdateSettings`. `adminSettings: false` makes the form read-only and ignores saved values.
+- **Login guard** (opt-in, `loginGuard`): failed Admin and/or Shop API `login` / `authenticate` attempts are
+  counted per client connection; past `maxFailures` in `windowMinutes` further logins from it are refused
+  (`RATE_LIMITED`) until the window ends, even with the right password. Lockouts are listed as blocked and raise
+  `security.login_lockout`.
+- **Shared limiter state** (opt-in, `rateLimits.store`): `database` (fixed windows in the new `cg_rate` table) or
+  `cache` (Vendure's `CacheService`, Redis when configured) instead of per-process memory (still the default). A
+  failing store falls back to memory for that request.
+- **Blocked connections** (`GET /checkout-guard/blocked`, `POST …/blocked/unblock`): card-testing blocks are
+  recorded in the new `cg_ip_block` table and listed; *Unblock* lifts a block or a login lockout and failures
+  before it stop counting. With a shared limiter store every process and a restart enforce stored blocks; with
+  the default memory store a restart still clears them, as in 0.3.
+- **Client IP on the order** (opt-in, `orderClientIp`): Order custom field `cgClientIp` (or a field the host
+  already has, `{ fieldName }`) written from the Shop API request at ArrangingPayment. Webhook declines of such an
+  order carry the IP, so the per-IP card-testing gate trips on them too. Needs `customFieldsCgclientip
+  varchar(64) NULL` when `synchronize` is off.
+- **Automatic per-order card-testing gate** (opt-in, `cardTesting.autoOrderGate`): `createStripePaymentIntent`
+  and card `addPaymentToOrder` on an order past `maxFailedPerOrder` are refused without the host's Stripe hook;
+  bank-transfer payments are never refused.
+- **`orderByCode` lookup limit** (opt-in, `orderLookup`): Shop API lookups per connection.
+
+### Added (premium)
+- **Bank-transfer reminder and expiry e-mails** (opt-in, `bankTransfer.emails`): sent to the customer from the
+  existing reminder and expiry events, with the account details, through the ops SMTP settings. Off by default
+  so hosts that already mail from the events are not doubled up.
+- **HULO Payments for Vendure holds** (opt-in, `holds.huloPayments`): manual-capture `hulo-*` payments join the
+  hold list with capture and release; `holds.huloPaymentsSafetyCapture` adds them to the safety capture. Soft
+  dependency: matched by handler code, nothing imported.
+- **Reconciliation amount-drift flag** (opt-in, `reconciliation.amountDrift`): known PaymentIntents whose Stripe
+  amount differs from the Vendure payment are logged once as `amount_drift` and alerted once per run.
+
+### Fixed
+- The admin page, the boot message and the README describe the tiers as the code applies them; the README's
+  licence section says AGPL-3.0-only, matching `package.json` and `LICENSE`.
+- The README no longer says every decline is recorded with its IP: webhook declines carry one only with
+  `orderClientIp`, and orphans never do.
+
+### Database
+- New tables `cg_rate` and `cg_ip_block` (created on boot, MariaDB/MySQL/PostgreSQL through the SDK dialect).
+  No change to existing tables; `customFieldsCgclientip` only with `orderClientIp`.
+
 ## [0.3.1] — 2026-11-13
 
 ### Security

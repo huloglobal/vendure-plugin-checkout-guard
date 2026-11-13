@@ -2,7 +2,7 @@
 
 # @huloglobal/vendure-plugin-checkout-guard
 
-[![npm](https://img.shields.io/npm/v/@huloglobal/vendure-plugin-checkout-guard?label=npm)](https://www.npmjs.com/package/@huloglobal/vendure-plugin-checkout-guard) [![downloads](https://img.shields.io/npm/dm/@huloglobal/vendure-plugin-checkout-guard)](https://www.npmjs.com/package/@huloglobal/vendure-plugin-checkout-guard) ![Vendure](https://img.shields.io/badge/Vendure-3.5%20%E2%80%93%203.7-17b) ![databases](https://img.shields.io/badge/MySQL%20%7C%20MariaDB%20%7C%20PostgreSQL-ok-green) [![licence](https://img.shields.io/badge/licence-AGPL--3.0%20%2B%20commercial-blue)](https://huloglobal.com/vendure-plugins/checkout-guard/)
+[![npm](https://img.shields.io/npm/v/@huloglobal/vendure-plugin-checkout-guard?label=npm)](https://www.npmjs.com/package/@huloglobal/vendure-plugin-checkout-guard) [![downloads](https://img.shields.io/npm/dm/@huloglobal/vendure-plugin-checkout-guard)](https://www.npmjs.com/package/@huloglobal/vendure-plugin-checkout-guard) ![Vendure](https://img.shields.io/badge/Vendure-3.5%20%E2%80%93%203.8-17b) ![databases](https://img.shields.io/badge/MySQL%20%7C%20MariaDB%20%7C%20PostgreSQL-ok-green) [![licence](https://img.shields.io/badge/licence-AGPL--3.0%20%2B%20commercial-blue)](https://huloglobal.com/vendure-plugins/checkout-guard/)
 
 The safety layer around Vendure checkout and payments. Vendure's Stripe
 integration settles a payment when the intent succeeds — and nothing else.
@@ -23,19 +23,19 @@ yarn add @huloglobal/vendure-plugin-checkout-guard   # or npm install / pnpm add
 1. Register `CheckoutGuardPlugin.init({ publicBaseUrl })` in `vendure-config.ts` (full options under [Install](#install)).
 2. Add `CheckoutGuardPlugin.uiExtensions` to your `compileUiExtensions` call and rebuild the admin UI.
 3. Restart Vendure. The tables are created on first boot; there is no migration to run.
-4. Open *Sales → Checkout guard* and click **Start 14-day free trial** to switch the premium guards on, or stay on the free tier (see [Tiers](#tiers)).
+4. Open *Sales → Checkout guard* and click **Start 14-day free trial** to switch the premium features on, or stay on the free tier (see [Tiers](#tiers)).
 
 
 ## What it does
 
 | Module | What you get |
 |---|---|
-| **Stripe holds** | `stripe-hold` payment handler + signed webhook for `payment_intent.amount_capturable_updated` → an *Authorized* payment, order placed as `PaymentAuthorized`. Capture / cancel from the admin, safety capture before Stripe's 7-day window, `payment_failed` recorded. |
+| **Stripe holds** | `stripe-hold` payment handler + signed webhook for `payment_intent.amount_capturable_updated` → an *Authorized* payment, order placed as `PaymentAuthorized`. Hold list with capture / release from the admin (free); auto-capture below a threshold, safety capture before Stripe's 7-day window and HULO Payments for Vendure holds (premium). `payment_failed` recorded in the decline log. |
 | **Bank transfer** | `bank-transfer` handler with the account details in the payment's **public metadata** (storefronts render them), eligibility checker (min / max, guests, customer groups), auto-expiry after N days, reminder event, admin *received* / *cancel*. Optional **Stripe bank transfers**: each customer pays into their own Stripe virtual account and the order settles by itself when the money arrives. |
-| **Guards** | Session-bound anonymous `orderByCode`; trusted client-IP contract for server-side proxies; token-bucket rate limits on checkout mutations. |
+| **Guards** | Session-bound anonymous `orderByCode`; trusted client-IP contract for server-side proxies; rate limits on checkout mutations (per process, or shared through the database or Vendure's cache); card-testing gate per connection and per order; opt-in login guard, `orderByCode` lookup limit and client IP on the order; blocked-connection list with unblock. |
 | **Observability** | Payment-event log (failed, client-declined, orphan, amount drift, expired), nightly Stripe reconciliation per channel, amount-drift guard, checkout funnel events with drop-off, ops alerts (Slack / Discord / Teams / Telegram / signed webhook / email). |
-| **Admin dashboard** | *Sales → Checkout Guard*: Overview (set-up checklist, KPIs, value metrics), Holds, Bank transfers, Payment events, Funnel, Settings (weekly report), Licence & billing. Plus a dashboard widget. |
-| **Weekly report** | Monday 08:00 e-mail with the week's numbers (holds, held value, bank transfers, rate-limited abuse, denied lookups, orphans) and the next set-up step. |
+| **Admin dashboard** | *Sales → Checkout Guard*: Overview (KPIs, value metrics; set-up checklist with a licence), Holds, Bank transfers, Payment events, Funnel, Settings (editable settings over the code's options, blocked connections, weekly report), Licence & billing. Plus a dashboard widget. |
+| **Weekly report** (premium) | Monday 08:00 e-mail with the week's numbers (holds, held value, bank transfers, rate-limited abuse, denied lookups, orphans) and the next set-up step. |
 
 ## Install
 
@@ -64,10 +64,28 @@ export const config: VendureConfig = {
                 trustedProxies: ['10.0.0.0/8'],
             },
             ops: { slackWebhookUrl: process.env.OPS_SLACK_WEBHOOK_URL, adminEmail: 'ops@example.com' },
+            // 0.4.0, all opt-in (off when left out):
+            // loginGuard: { enabled: true, maxFailures: 5, windowMinutes: 15, apis: 'both' },
+            // orderLookup: { enabled: true, capacity: 20, windowSeconds: 60 },
+            // rateLimits: { store: 'database' },            // or 'cache'; default 'memory'
+            // cardTesting: { autoOrderGate: true },
+            // orderClientIp: true,                         // Order custom field cgClientIp (migration)
+            // bankTransfer: { emails: true },              // premium
+            // reconciliation: { amountDrift: true },       // premium
+            // holds: { huloPayments: true },               // premium
+            // adminSettings: false,                        // Settings tab read-only
         }),
     ],
 };
 ```
+
+**Settings in the admin.** Everything above except secrets, URLs and the
+custom field can also be changed in *Checkout Guard → Settings*: the
+`init()` options are the defaults, a saved value overrides them, and **Reset
+to code defaults** deletes every saved value. Saving needs the
+`UpdateSettings` permission; every server and worker picks a change up within
+a minute (one JSON value in `hulo_plugin_prefs`). `adminSettings: false`
+makes the tab read-only and ignores anything saved.
 
 Admin UI: add `CheckoutGuardPlugin.uiExtensions` to your `compileUiExtensions`
 list. That registers the *Sales → Checkout Guard* page and the dashboard
@@ -79,9 +97,18 @@ install:
 ALTER TABLE `order` ADD `customFieldsCgsessionhash` varchar(64) NULL;
 ```
 
+With `orderClientIp: true` the plugin also adds `cgClientIp`:
+
+```sql
+ALTER TABLE `order` ADD `customFieldsCgclientip` varchar(64) NULL;
+```
+
+(`orderClientIp: { fieldName: 'ip' }` writes to a field your host already
+has instead and adds nothing.)
+
 Tables `checkout_guard_payment_event`, `checkout_guard_funnel_event`,
-`checkout_guard_bank_transfer`, `checkout_guard_state`, `cg_counter` and the
-shared `hulo_plugin_prefs` are created on boot (MySQL / MariaDB / PostgreSQL
+`checkout_guard_bank_transfer`, `checkout_guard_state`, `cg_counter`,
+`cg_rate`, `cg_ip_block` and the shared `hulo_plugin_prefs` are created on boot (MySQL / MariaDB / PostgreSQL
 via the licence SDK's dialect adapter).
 
 ## Stripe holds
@@ -108,10 +135,23 @@ needed and adds an **Authorized** payment. An intent that is already
 `succeeded` (captured in the Stripe dashboard before the event arrived) is
 recorded and settled straight away; one that is `canceled` is logged as a
 `hold_expired` payment event and no payment is added. The order is placed.
-Holds below `autoCaptureBelowMinor` are captured right after the recording
-transaction commits — never while the order row is locked. Capture it from *Checkout Guard → Holds* (settles the payment)
-or from the order page; cancel releases the hold. The safety cron captures
-any hold older than `safetyCaptureDays` (default 6) and alerts you.
+Capture it from *Checkout Guard → Holds* (settles the payment) or from the
+order page; cancel releases the hold. Recording, the hold list, capture and
+release are **free**. With a licence (or the evaluation), holds below
+`autoCaptureBelowMinor` are captured right after the recording transaction
+commits — never while the order row is locked — and the safety cron captures
+any hold older than `safetyCaptureDays` (default 6) and alerts you. On the
+free tier nothing is captured automatically: capture before Stripe lets the
+authorisation lapse (7 days; the `canceled` event then cancels the payment).
+
+**HULO Payments for Vendure holds** (premium, opt-in `holds: { huloPayments:
+true }`). Payments made through a `hulo-*` handler with manual capture
+(`metadata.capture = 'manual'`, any provider; bank transfer and pay later are
+never holds) join the hold list, with the same capture and release (through
+Vendure, so HULO Payments' own handler talks to the provider).
+`huloPaymentsSafetyCapture: true` lets the safety cron capture them too. There
+is no import: the plugins are matched by handler code, so neither needs the
+other.
 Storefronts should treat `PaymentAuthorized` as "payment authorised, under
 review".
 
@@ -127,7 +167,11 @@ currency, payBy, instructions }` — render that on the payment step and on
 the confirmation page while the order is `PaymentAuthorized`. Unpaid orders
 expire after `expiryDays` (cancelled, `BankTransferExpiredEvent`); a
 `BankTransferReminderEvent` fires once after `reminderAfterDays` — subscribe
-to both to email the customer. Mark money received from the dashboard.
+to both to email the customer, or (premium) set `bankTransfer: { emails: true
+}` and Checkout Guard sends a plain reminder with the account details and an
+expiry notice itself, through the same SMTP settings as the ops e-mails. Leave
+it off when your shop already mails from the events. Mark money received
+from the dashboard.
 
 ### Stripe bank transfers
 
@@ -195,9 +239,8 @@ CheckoutGuardPlugin.init({
    is checked against the other configured secrets: an event without Vendure
    metadata is then acknowledged as before, and one that names a channel but
    is signed for another account's endpoint is acknowledged and never acted
-   on. Likewise, while premium is locked the hold module answers 200 (not
-   503) for events about payments that are not holds, so days of retries
-   cannot get the shared endpoint disabled.
+   on. The hold module handles events on every tier (since 0.4.0), so the
+   shared endpoint never sees days of retries.
 4. **Vendure's StripePlugin must skip these intents.** They carry only
    Checkout Guard's metadata (`cg_bank_transfer`, `cg_order_code`,
    `cg_order_id`, `cg_channel_id`), never `channelToken` / `orderCode` /
@@ -377,8 +420,8 @@ reminders stay premium.
   comments are stripped before matching, so `applyCouponCode # x\n(` cannot
   slip past the limiter.
 
-- **Card-testing gate** (free, on by default). Every failed or client-declined
-  card attempt is already recorded with its IP and order code; once an IP has
+- **Card-testing gate** (free, on by default). Failed and client-declined
+  card attempts are recorded with their order code (and IP, see below); once an IP has
   4 failures in an hour its `createStripePaymentIntent` / `addPaymentToOrder`
   calls get `429 { errors: [{ message: 'card_testing_blocked' }] }` for 12 h,
   and once an order has 3 failures the host can refuse a new PaymentIntent:
@@ -394,12 +437,52 @@ reminders stay premium.
   })
   ```
 
+  With `cardTesting: { autoOrderGate: true }` (opt-in) the order cap is
+  enforced without that hook: `createStripePaymentIntent` and card
+  `addPaymentToOrder` calls on an order past its cap answer a GraphQL error
+  with `extensions.code = 'RATE_LIMITED'` (a bank-transfer payment is never
+  refused).
+
+  What counts: Stripe `payment_intent.payment_failed` webhooks (recorded on
+  every tier since 0.4.0) and `/checkout-guard/client-decline` reports. The
+  per-IP count needs an IP on the record: client-decline reports carry the
+  resolved client IP; a webhook decline carries one only when
+  `orderClientIp` is on (the order's stored IP is used). Without it the IP
+  gate trips on client-decline reports only, and the order gate on both.
+
   Tune with `cardTesting: { maxFailedPerIp, maxFailedPerOrder, windowMinutes,
   blockMinutes, mutations }` or switch off with `cardTesting: false`. Each trip
   raises the ops event `payment.card_testing` once per IP per block window.
+  Blocks are recorded in `cg_ip_block`: *Settings → Blocked connections* lists
+  them and **Unblock** lifts one (failures before the unblock stop counting).
+  With a shared `rateLimits.store` every server process and a restart enforce
+  them too; with the default `memory` store each process keeps its own, as
+  before.
   The gate keys on the resolved client IP, so `trustedClientIp.trustedProxies`
   must list **every** hop between the internet and Vendure (CDN ranges, the TLS
   proxy, a local nginx on loopback) — otherwise all shoppers share one address.
+
+- **Shared limiter state.** `rateLimits.store` (or the Settings tab):
+  `memory` (default, per process, the 0.3 behaviour), `database` (fixed
+  windows in `cg_rate`, one upsert per limited request, shared by every
+  process and kept across restarts) or `cache` (Vendure's `CacheService`,
+  Redis when your cache strategy is Redis). A shared store that fails falls
+  back to memory for that request, never blocks it.
+- **Login guard** (opt-in, `loginGuard: { enabled: true }`). Failed `login` /
+  `authenticate` mutations (`INVALID_CREDENTIALS_ERROR`) count per client
+  connection (IPv4 address or IPv6 /64) on the Admin API, the Shop API or
+  both (`apis`). After `maxFailures` (5) inside `windowMinutes` (15) further
+  logins from that connection are refused — even with the right password —
+  with a GraphQL error `extensions.code = 'RATE_LIMITED'` until the window
+  ends. The lockout is listed under *Blocked connections* and raises
+  `security.login_lockout` on the ops channels.
+- **`orderByCode` lookup limit** (opt-in, `orderLookup: { enabled: true,
+  capacity: 20, windowSeconds: 60 }`): Shop API lookups per connection;
+  past the cap the query answers `RATE_LIMITED`.
+- **Client IP on the order** (opt-in, `orderClientIp: true`): the resolved
+  client IP is written to the order's `cgClientIp` custom field when it goes
+  to ArrangingPayment (and at placement if still empty). Shop API requests
+  only — webhooks and admin actions never overwrite it.
 
 ## Observability
 
@@ -410,7 +493,12 @@ reminders stay premium.
   `step` ∈ `cart | address | payment | pay_attempt | pay_failed | coupon_rejected | placed`.
 - Reconciliation runs daily at 04:10 on the worker: every succeeded or held
   PaymentIntent in the last `lookbackDays` is matched to a Vendure payment;
-  unmatched ones are logged as `orphan` and alerted. `POST /checkout-guard/reconcile/run` runs it now.
+  unmatched ones are logged as `orphan` and alerted (orphan rows carry no client IP:
+  Stripe's listing has none). `POST /checkout-guard/reconcile/run` runs it now.
+- With `reconciliation: { amountDrift: true }` (premium, opt-in) the same
+  pass also flags PaymentIntents Vendure **does** know whose Stripe amount
+  (received, for a succeeded intent) differs from the Vendure payment: an
+  `amount_drift` event per intent (once) and one ops alert per run.
 - A settled payment whose amount differs from the order total is logged as
   `amount_drift` and alerted. The check runs once the order has left the
   payment phase, so a split payment (gift card + card) is not reported.
@@ -435,11 +523,19 @@ reminders stay premium.
 | GET | `/checkout-guard/events?kind=&days=` · `/summary` · `/funnel/summary?days=` | Admin |
 | POST | `/checkout-guard/reconcile/run` | Admin |
 | GET | `/checkout-guard/meta` · `/settings` · `/setup` · `/widget` | Admin |
-| GET/POST | `/checkout-guard/digest/settings`, POST `/digest/send-test`, GET `/digest/preview` | Admin |
+| GET/POST | `/checkout-guard/admin-settings`, POST `/admin-settings/reset` | Admin (saving: UpdateSettings) |
+| GET | `/checkout-guard/blocked`, POST `/blocked/unblock { ip }` | Admin |
+| GET/POST | `/checkout-guard/digest/settings`, POST `/digest/send-test`, GET `/digest/preview` | Admin (send and preview: premium) |
 | POST | `/checkout-guard/eval/remind-me` | Admin |
 | POST | `/checkout-guard/licence/activate` · `/deactivate` · `/purchase-link` · `/portal-link`, GET `/licence/claim-status` | Admin |
 
 ## Weekly report, setup checklist and dashboard widget
+
+The weekly report and the set-up checklist are **premium** (since 0.4.0):
+with a licence or during the 14-day evaluation they work as below; without
+one nothing is sent and the checklist is not shown. A lapsed licence stops
+them and keeps their settings; a new one resumes them. The dashboard widget
+stays free.
 
 **Weekly report.** Every Monday at 08:00 (server-local time) the worker
 e-mails one report covering the previous seven days, with the week before
@@ -500,14 +596,23 @@ live under `/checkout-guard`; see [Endpoints](#endpoints).
 
 ## Tiers
 
-**Free:** session-bound order lookup, trusted client IP, rate limits, funnel
-events, the bank-transfer handler and checker (including Stripe bank transfers,
-their automatic settlement and their `bank.stripe_*` alerts), the dashboard.
-**Licensed (or the 14-day card-backed trial):** Stripe hold handling, bank-transfer
-auto-expiry and reminders, failed-payment recording, reconciliation, the
-amount-drift guard and ops alerts. Start the trial or buy from the admin
-page; the licence installs itself.
+**Free:** the Stripe hold list with capture and release (webhook recording
+included), session-bound order lookup, trusted client IP, rate limits with
+the shared limiter store, the card-testing gate (per connection, per order
+and the automatic order gate), the decline log, the login guard, the
+`orderByCode` lookup limit, the client IP on the order, the blocked list with
+unblock, admin-editable settings, funnel events, the bank-transfer handler
+and checker (including Stripe bank transfers, their automatic settlement and
+their `bank.stripe_*` alerts), the dashboard and widget.
+**Licensed (or the 14-day evaluation, no card needed):** auto-capture and the
+safety capture of holds, HULO Payments for Vendure holds, bank-transfer
+auto-expiry, reminders and customer e-mails, reconciliation (orphans and
+amount drift), the amount-drift guard at settlement, ops alerts, the weekly
+report and the set-up checklist. Start the evaluation or buy from the admin
+page; the licence installs itself. When a licence lapses the premium
+features stop and their data is kept.
 
 ## Licence
 
-AGPL-3.0-or-later. Commercial licences: https://huloglobal.com/vendure-plugins/checkout-guard/
+AGPL-3.0-only (the `license` field in `package.json`; the full text is in
+`LICENSE`). Commercial licences: https://huloglobal.com/vendure-plugins/checkout-guard/
