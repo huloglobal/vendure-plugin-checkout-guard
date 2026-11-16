@@ -5,6 +5,42 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-11-16
+
+Improvement round. **Nothing changes by default**: the e-mail look is new and optional, the subjects, recipients
+and timing of every e-mail are the same as in 0.4.0, and the customer e-mails stay off until
+`bankTransfer.emails` is switched on.
+
+### Changed
+- **Customer e-mails redesigned.** The bank-transfer reminder and expiry notice use one clean layout: a 600px card
+  with your logo or store name over an accent bar, an amber "Complete your bank transfer" box with the order's
+  own bank details (account name, sort code, account number, IBAN and BIC when set), the payment reference in
+  monospace, the amount and the pay-by date, a button to Stripe's payment instructions for Stripe bank transfers,
+  "Kind regards" with your store name and support address, and your footer line. Both now have a plain-text part.
+- **Ops alert e-mails** use the compact version of the same layout and gain a plain-text part (they were HTML
+  only). Subjects are unchanged, so mail filters keep working.
+
+### Added
+- `email` option and *Settings → E-mail appearance*: store name, accent colour (default `#155dfc`), logo URL and
+  width, support e-mail, storefront URL, footer or legal line. Validated (hex colour, https URLs, e-mail address,
+  no markup).
+- `GET /checkout-guard/email-preview?kind=reminder|expired|alert` (admin, ReadOrder): a sample of each e-mail
+  with the saved look, served with a script-free Content-Security-Policy; `&format=text` for the plain-text part.
+  Preview buttons on the Settings tab.
+
+### Fixed
+- Two overlapping bank-transfer sweeps could both publish the reminder for the same payment, so a customer could
+  get the reminder e-mail twice. The reminder is now claimed with a conditional update and only the run that
+  claims it publishes `BankTransferReminderEvent`.
+- e2e: the expiry test waits for the EventBus subscriber that records `bank_expired` instead of racing it.
+
+### Dependencies
+- Dev ranges raised to the current minor/patch releases: `@nestjs/common` / `@nestjs/core` ^12.5.0,
+  `@nestjs/schedule` ^12.0.4, `@types/node` ^20.19.43, `@types/nodemailer` ^6.4.24, `mysql2` ^3.24.6,
+  `nodemailer` ^6.10.1, `typescript` ^5.9.3, `vitest` ^2.1.9. Majors held back: nodemailer 10, TypeScript 7,
+  vitest 5 (the monorepo harness pins 2.1.9), `@types/node` 26, `@types/nodemailer` 8, TypeORM 1.x (Vendure 3
+  uses 0.3). Peer ranges unchanged (`@vendure/core >=3.5.0 <4.0.0`).
+
 ## [0.4.0] — 2026-11-13
 
 Parity with HULO Checkout Guard for WordPress. **Nothing changes by default for a licensed install**: every new

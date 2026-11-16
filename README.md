@@ -74,6 +74,9 @@ export const config: VendureConfig = {
             // reconciliation: { amountDrift: true },       // premium
             // holds: { huloPayments: true },               // premium
             // adminSettings: false,                        // Settings tab read-only
+            // 0.5.0, optional look of the e-mails the plugin sends (also on the Settings tab):
+            // email: { storeName: 'Acme', accentColor: '#155dfc', logoUrl: 'https://…/logo.png',
+            //          supportEmail: 'help@acme.example', footerText: 'Acme Ltd, registered in England…' },
         }),
     ],
 };
@@ -168,10 +171,20 @@ the confirmation page while the order is `PaymentAuthorized`. Unpaid orders
 expire after `expiryDays` (cancelled, `BankTransferExpiredEvent`); a
 `BankTransferReminderEvent` fires once after `reminderAfterDays` — subscribe
 to both to email the customer, or (premium) set `bankTransfer: { emails: true
-}` and Checkout Guard sends a plain reminder with the account details and an
-expiry notice itself, through the same SMTP settings as the ops e-mails. Leave
-it off when your shop already mails from the events. Mark money received
-from the dashboard.
+}` and Checkout Guard sends the reminder and the expiry notice itself, through
+the same SMTP settings as the ops e-mails. Leave it off when your shop already
+mails from the events. Mark money received from the dashboard.
+
+The reminder shows the order's own bank details exactly as stored on the
+payment (account name, sort code, account number, IBAN and BIC when set, the
+payment reference in monospace, the amount and the pay-by date) and, for
+Stripe bank transfers, a button to Stripe's payment instructions page. Both
+messages have a plain-text part, and use your look from the `email` option or
+the Settings tab: store name or logo over an accent bar (default `#155dfc`),
+"Kind regards" with your store name and support address, and your footer or
+legal line. Nothing in them names the plugin or its vendor. *Settings → E-mail
+appearance* has previews of the reminder, the expiry notice and the ops alert
+e-mail. The subjects are unchanged from earlier versions.
 
 ### Stripe bank transfers
 
@@ -525,6 +538,7 @@ reminders stay premium.
 | GET | `/checkout-guard/meta` · `/settings` · `/setup` · `/widget` | Admin |
 | GET/POST | `/checkout-guard/admin-settings`, POST `/admin-settings/reset` | Admin (saving: UpdateSettings) |
 | GET | `/checkout-guard/blocked`, POST `/blocked/unblock { ip }` | Admin |
+| GET | `/checkout-guard/email-preview?kind=reminder|expired|alert&format=text` | Admin |
 | GET/POST | `/checkout-guard/digest/settings`, POST `/digest/send-test`, GET `/digest/preview` | Admin (send and preview: premium) |
 | POST | `/checkout-guard/eval/remind-me` | Admin |
 | POST | `/checkout-guard/licence/activate` · `/deactivate` · `/purchase-link` · `/portal-link`, GET `/licence/claim-status` | Admin |
