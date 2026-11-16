@@ -3,6 +3,7 @@ import { EventBus, Logger, Order, Payment, TransactionalConnection } from '@vend
 import { Subscription } from 'rxjs';
 import { BankTransferExpiredEvent, BankTransferReminderEvent } from './bank-transfer.events';
 import { readBankTransferPublicDetails, BankTransferPublicDetails } from './bank-details';
+import { accentOf, EmailBranding, infoBox, paragraph, renderLayout, renderText, Row, rowsText, safeEmail, safeUrl, button, warningBox } from '../email/layout';
 
 const loggerCtx = 'CheckoutGuard:BankTransfer';
 
@@ -12,7 +13,7 @@ const loggerCtx = 'CheckoutGuard:BankTransfer';
  *
  * The expiry sweep has always published `BankTransferReminderEvent` and
  * `BankTransferExpiredEvent` for hosts to send their own mail; this sends a
- * plain branded-neutral message itself, through the same SMTP transport the
+ * message in the merchant's own look (`email` option) itself, through the same SMTP transport the
  * ops alerts and weekly report use. Off by default, so a host that already
  * mails from those events is not doubled up.
  */
@@ -20,8 +21,10 @@ export interface BankEmailRuntime {
     enabled(): boolean;
     hasPremiumAccess(): boolean;
     send(to: string, mail: { subject: string; text: string; html: string }): Promise<void>;
-    /** Shop name for the greeting line (channel or `publicBaseUrl` host). */
+    /** Shop name for the header and sign-off when `email.storeName` is not set (`publicBaseUrl` host). */
     storeName(): string;
+    /** The merchant's e-mail look (`email` option / Settings tab). */
+    branding(): EmailBranding;
 }
 
 let runtime: BankEmailRuntime = {
@@ -29,14 +32,11 @@ let runtime: BankEmailRuntime = {
     hasPremiumAccess: () => false,
     send: async () => { throw new Error('not configured'); },
     storeName: () => '',
+    branding: () => ({}),
 };
 
 export function setBankEmailRuntime(rt: Partial<BankEmailRuntime>): void {
     runtime = { ...runtime, ...rt };
-}
-
-function esc(s: string): string {
-    return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 }
 
 export function formatAmount(minor: number, currency: string): string {
@@ -55,32 +55,83 @@ function day(iso: string | Date): string {
     return Number.isFinite(d.getTime()) ? d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }) : String(iso);
 }
 
-/** Compose the reminder or expiry e-mail. Pure. */
-export function composeBankEmail(kind: 'reminder' | 'expired', input: {
-    orderCode: string; payBy: Date; details: BankTransferPublicDetails | null; storeName?: string; amountMinor?: number; currency?: string;
-}): { subject: string; text: string; html: string } {
+export interface BankEmailInput {
+    orderCode: string;
+    payBy: Date;
+    details: BankTransferPublicDetails | null;
+    /** Fallback store name (the `branding.storeName` wins). */
+    storeName?: string;
+    amountMinor?: number;
+    currency?: string;
+    branding?: EmailBranding | null;
+}
+
+/**
+ * Compose the reminder or expiry e-mail (HTML and plain text). Pure.
+ * The reminder carries the order's own bank details and payment reference,
+ * exactly as stored on the payment, so the customer can pay from it.
+ */
+export function composeBankEmail(kind: 'reminder' | 'expired', input: BankEmailInput): { subject: string; text: string; html: string } {
     const d = input.details;
+    const branding: EmailBranding = { ...(input.branding || {}) };
+    if (!String(branding.storeName || '').trim()) branding.storeName = (input.storeName || '').trim();
+    const accent = accentOf(branding);
     const amount = formatAmount(d?.amountMinor ?? input.amountMinor ?? 0, d?.currency ?? input.currency ?? 'GBP');
-    const store = (input.storeName || '').trim();
-    const sig = store ? `\n\n${store}` : '';
+    const dueBy = day(input.payBy);
+    const support = safeEmail(branding.supportEmail);
+
     if (kind === 'expired') {
         const subject = `Your order ${input.orderCode} has been cancelled`;
-        const body = `We did not receive your bank transfer of ${amount} for order ${input.orderCode} by ${day(input.payBy)}, so the order has been cancelled. If you have just paid, please reply to this e-mail with the payment details and we will sort it out.`;
-        return { subject, text: body + sig, html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px"><p>${esc(body)}</p>${store ? `<p>${esc(store)}</p>` : ''}</div>` };
+        const intro = `We did not receive your bank transfer of ${amount} for order ${input.orderCode} by ${dueBy}, so the order has been cancelled.`;
+        const paid = 'If you have just paid, please reply to this e-mail with the payment details and we will sort it out.';
+        const rows: Row[] = [
+            { label: 'Order', value: input.orderCode, mono: true },
+            { label: 'Amount', value: amount },
+            { label: 'Was due by', value: dueBy },
+        ];
+        const help = support ? `You can also write to us at ${support}.` : '';
+        const heading = 'Your order has been cancelled';
+        const html = renderLayout({
+            branding, heading, preheader: intro,
+            body: paragraph(intro) + infoBox(rows, { accent }) + paragraph(paid) + (help ? paragraph(help) : ''),
+        });
+        const text = renderText({ branding, heading, lines: [intro, '', ...rowsText(rows), '', paid, ...(help ? [help] : [])] });
+        return { subject, text, html };
     }
-    const rows: Array<[string, string | undefined]> = [
-        ['Account name', d?.accountName], ['Sort code', d?.sortCode], ['Account number', d?.accountNumber],
-        ['IBAN', d?.iban], ['BIC', d?.bic], ['Reference', d?.reference || input.orderCode], ['Amount', amount],
-    ];
-    const shown = rows.filter((r): r is [string, string] => !!r[1]);
-    const intro = `We have not received your bank transfer for order ${input.orderCode} yet. Please pay ${amount} by ${day(input.payBy)} so we can process your order; after that date the order is cancelled.`;
-    const text = `${intro}\n\n${shown.map(([k, v]) => `${k}: ${v}`).join('\n')}${d?.hostedInstructionsUrl ? `\n\nPayment instructions: ${d.hostedInstructionsUrl}` : ''}${sig}`;
-    const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px">
-<p>${esc(intro)}</p>
-<table cellpadding="4" style="border-collapse:collapse">${shown.map(([k, v]) => `<tr><td style="color:#555">${esc(k)}</td><td><strong>${esc(v)}</strong></td></tr>`).join('')}</table>
-${d?.hostedInstructionsUrl ? `<p><a href="${esc(d.hostedInstructionsUrl)}">Payment instructions</a></p>` : ''}
-${store ? `<p>${esc(store)}</p>` : ''}
-</div>`;
+
+    const reference = d?.reference || input.orderCode;
+    const bankRows: Row[] = [];
+    if (d?.accountName) bankRows.push({ label: 'Account name', value: d.accountName });
+    if (d?.sortCode) bankRows.push({ label: 'Sort code', value: d.sortCode, mono: true });
+    if (d?.accountNumber) bankRows.push({ label: 'Account number', value: d.accountNumber, mono: true });
+    if (d?.iban) bankRows.push({ label: 'IBAN', value: d.iban, mono: true });
+    if (d?.bic) bankRows.push({ label: 'BIC', value: d.bic, mono: true });
+    const hasAccount = bankRows.length > 0;
+    bankRows.push({ label: 'Reference', value: reference, mono: true, accent: true });
+    bankRows.push({ label: 'Amount', value: amount });
+    bankRows.push({ label: 'Please pay by', value: dueBy });
+
+    const intro = `We have not received your bank transfer for order ${input.orderCode} yet. Please pay ${amount} by ${dueBy} so we can process your order; after that date the order is cancelled.`;
+    const boxIntro = 'Please transfer the amount below, quoting the reference exactly. It is unique to your order, so your payment is matched automatically.';
+    const noAccount = hasAccount ? '' : 'Please use the bank details from your order confirmation.';
+    const instructions = (d?.instructions || '').trim();
+    const note = [noAccount, instructions].filter(Boolean).join(' ');
+    const hosted = safeUrl(d?.hostedInstructionsUrl);
+    const already = 'If you have already sent the transfer, thank you: there is nothing more to do. Transfers can take a little while to reach us.';
+    const help = support ? `Questions? Write to us at ${support}.` : '';
+    const heading = 'Your bank transfer is still due';
+    const html = renderLayout({
+        branding, heading, preheader: `Please pay ${amount} by ${dueBy}, quoting ${reference}.`,
+        body: paragraph(intro)
+            + warningBox({ title: 'Complete your bank transfer', intro: boxIntro, rows: bankRows, note, accent })
+            + (hosted ? button(hosted, 'View payment instructions', accent, 'primary') : '')
+            + paragraph(already) + (help ? paragraph(help) : ''),
+    });
+    const text = renderText({
+        branding, heading,
+        lines: [intro, '', 'Complete your bank transfer', boxIntro, '', ...rowsText(bankRows), ...(note ? ['', note] : []),
+            ...(hosted ? ['', `Payment instructions: ${hosted}`] : []), '', already, ...(help ? [help] : [])],
+    });
     return { subject: `Reminder: your bank transfer for order ${input.orderCode}`, text, html };
 }
 
@@ -112,7 +163,7 @@ export class BankTransferEmailSubscriber implements OnApplicationBootstrap, OnMo
             if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return false;
             const mail = composeBankEmail(kind, {
                 orderCode: order.code, payBy, details: readBankTransferPublicDetails(payment?.metadata),
-                storeName: runtime.storeName(), amountMinor: payment?.amount, currency: order.currencyCode,
+                storeName: runtime.storeName(), branding: runtime.branding(), amountMinor: payment?.amount, currency: order.currencyCode,
             });
             await runtime.send(email, mail);
             Logger.info(`Bank transfer ${kind} e-mail sent for order ${order.code}`, loggerCtx);

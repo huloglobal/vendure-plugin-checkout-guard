@@ -98,3 +98,25 @@ describe('resolvers', () => {
         expect(bankEmailsEnabled({})).toBe(false);
     });
 });
+
+describe('e-mail appearance settings', () => {
+    it('validates and keeps only set values', () => {
+        expect(sanitiseAdminSettings({ email: { storeName: ' Acme ', accentColor: '#ff0066', logoUrl: 'https://cdn.acme.test/l.png', logoWidth: 120, supportEmail: 'help@acme.test', footerText: 'Acme Ltd', storeUrl: '' } }))
+            .toEqual({ email: { storeName: 'Acme', accentColor: '#ff0066', logoUrl: 'https://cdn.acme.test/l.png', logoWidth: 120, supportEmail: 'help@acme.test', footerText: 'Acme Ltd' } });
+        expect(sanitiseAdminSettings({ email: { storeName: null, accentColor: '' } })).toEqual({});
+    });
+
+    it('refuses bad colours, non-https URLs, bad addresses and markup', () => {
+        expect(() => sanitiseAdminSettings({ email: { accentColor: 'red' } })).toThrow(/accentColor/);
+        expect(() => sanitiseAdminSettings({ email: { logoUrl: 'http://x.test/l.png' } })).toThrow(/logoUrl/);
+        expect(() => sanitiseAdminSettings({ email: { logoUrl: 'javascript:alert(1)' } })).toThrow(/logoUrl/);
+        expect(() => sanitiseAdminSettings({ email: { supportEmail: 'nobody' } })).toThrow(/supportEmail/);
+        expect(() => sanitiseAdminSettings({ email: { footerText: '<script>' } })).toThrow(/footerText/);
+        expect(() => sanitiseAdminSettings({ email: { logoWidth: 5000 } })).toThrow(/logoWidth/);
+    });
+
+    it('merges over the code options field by field', () => {
+        const out = mergeAdminSettings({ email: { storeName: 'Code', footerText: 'Legal' } } as any, { email: { accentColor: '#000000' } });
+        expect(out.email).toEqual({ storeName: 'Code', footerText: 'Legal', accentColor: '#000000' });
+    });
+});

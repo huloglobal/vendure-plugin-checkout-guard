@@ -663,6 +663,22 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                                     <label class="field-row">Expire unpaid after (days) <input class="form-input num-input" type="number" min="1" [(ngModel)]="form.bankTransfer.expiryDays" [disabled]="!canEditSettings()"></label>
                                     <label class="field-row">Remind after (days) <input class="form-input num-input" type="number" min="1" [(ngModel)]="form.bankTransfer.reminderAfterDays" [disabled]="!canEditSettings()"></label>
                                     <label class="field-row"><input type="checkbox" [(ngModel)]="form.bankTransfer.emails" [disabled]="!canEditSettings()"> E-mail the customer the reminder and the expiry notice (leave off if your shop already sends them)</label>
+                                    <div class="subsection-title" style="margin-top:12px">E-mail appearance <small>reminder, expiry notice and alert e-mails</small></div>
+                                    <ng-container *ngIf="form.email">
+                                        <label class="field-row">Store name <input class="form-input" type="text" maxlength="100" [(ngModel)]="form.email.storeName" [disabled]="!canEditSettings()" placeholder="Your shop's host name"></label>
+                                        <label class="field-row">Accent colour <input class="form-input num-input" type="text" maxlength="7" [(ngModel)]="form.email.accentColor" [disabled]="!canEditSettings()" placeholder="#155dfc"></label>
+                                        <label class="field-row">Logo URL (https) <input class="form-input" type="url" maxlength="500" [(ngModel)]="form.email.logoUrl" [disabled]="!canEditSettings()"></label>
+                                        <label class="field-row">Logo width (px) <input class="form-input num-input" type="number" min="40" max="300" [(ngModel)]="form.email.logoWidth" [disabled]="!canEditSettings()" placeholder="140"></label>
+                                        <label class="field-row">Support e-mail <input class="form-input" type="email" maxlength="254" [(ngModel)]="form.email.supportEmail" [disabled]="!canEditSettings()"></label>
+                                        <label class="field-row">Storefront URL (https) <input class="form-input" type="url" maxlength="500" [(ngModel)]="form.email.storeUrl" [disabled]="!canEditSettings()"></label>
+                                        <label class="field-row">Footer or legal line <input class="form-input" type="text" maxlength="500" [(ngModel)]="form.email.footerText" [disabled]="!canEditSettings()"></label>
+                                        <div class="field-inline">
+                                            <span class="hint small">Preview (saved settings):</span>
+                                            <button class="gbtn gbtn-outline gbtn-sm" (click)="previewEmail('reminder')" [disabled]="emailPreviewing">Reminder</button>
+                                            <button class="gbtn gbtn-outline gbtn-sm" (click)="previewEmail('expired')" [disabled]="emailPreviewing">Expiry notice</button>
+                                            <button class="gbtn gbtn-outline gbtn-sm" (click)="previewEmail('alert')" [disabled]="emailPreviewing">Alert</button>
+                                        </div>
+                                    </ng-container>
                                     <div class="subsection-title" style="margin-top:12px">Reconciliation <small *ngIf="premiumLocked" class="warn-inline">needs a licence</small></div>
                                     <label class="field-row"><input type="checkbox" [(ngModel)]="form.reconciliation.enabled" [disabled]="!canEditSettings()"> Nightly Stripe reconciliation</label>
                                     <label class="field-row">Look back (days) <input class="form-input num-input" type="number" min="1" max="30" [(ngModel)]="form.reconciliation.lookbackDays" [disabled]="!canEditSettings()"></label>
@@ -773,6 +789,7 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                                 <tr><td class="mono small">GET /checkout-guard/setup · /widget</td><td>Admin</td><td>Set-up checklist and the dashboard widget</td></tr>
                                 <tr><td class="mono small">GET|POST /checkout-guard/digest/settings · POST …/send-test · GET …/preview</td><td>Admin</td><td>Weekly report (premium)</td></tr>
                                 <tr><td class="mono small">GET|POST /checkout-guard/admin-settings · POST …/reset</td><td>Admin</td><td>The Settings form above (saving needs UpdateSettings)</td></tr>
+                                <tr><td class="mono small">GET /checkout-guard/email-preview?kind=reminder|expired|alert</td><td>Admin</td><td>A sample e-mail with the saved look (<code class="mono">&amp;format=text</code> for the plain-text part)</td></tr>
                                 <tr><td class="mono small">GET /checkout-guard/blocked · POST …/unblock</td><td>Admin</td><td>Blocked connections</td></tr>
                             </tbody>
                         </table>
@@ -1114,6 +1131,7 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
     digestSaving = false;
     digestSending = false;
     digestPreviewing = false;
+    emailPreviewing = false;
     digestError = '';
 
     /** Rendered through interpolation: Angular would otherwise read the braces as ICU expressions. */
@@ -1304,6 +1322,15 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
             stripe: { safetyCaptureDays: f.stripe.safetyCaptureDays, autoCaptureBelowMinor: auto === '' || auto === null || auto === undefined ? null : Number(auto) },
             reconciliation: { ...f.reconciliation },
             holds: { ...f.holds },
+            email: f.email ? {
+                storeName: f.email.storeName || null,
+                accentColor: f.email.accentColor || null,
+                logoUrl: f.email.logoUrl || null,
+                logoWidth: f.email.logoWidth === '' || f.email.logoWidth === null || f.email.logoWidth === undefined ? null : Number(f.email.logoWidth),
+                supportEmail: f.email.supportEmail || null,
+                footerText: f.email.footerText || null,
+                storeUrl: f.email.storeUrl || null,
+            } : undefined,
         };
         this.settingsSaving = true;
         this.subs.add(this.http.post<any>(`${API}/admin-settings`, { settings }).subscribe({
@@ -1450,6 +1477,22 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
                 this.cdr.markForCheck();
             },
             error: e => { this.digestSending = false; this.notification.error(this.errMsg(e, 'Could not send the test report')); this.cdr.markForCheck(); },
+        }));
+    }
+
+    /** A sample customer or alert e-mail with the saved look, opened like the report preview. */
+    previewEmail(kind: 'reminder' | 'expired' | 'alert') {
+        if (this.emailPreviewing) return;
+        this.emailPreviewing = true;
+        this.subs.add(this.http.get(`${API}/email-preview?kind=${kind}`, { responseType: 'text' }).subscribe({
+            next: html => {
+                this.emailPreviewing = false;
+                const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+                window.open(url, '_blank', 'noopener');
+                setTimeout(() => URL.revokeObjectURL(url), 60_000);
+                this.cdr.markForCheck();
+            },
+            error: e => { this.emailPreviewing = false; this.notification.error(this.errMsg(e, 'Could not build the preview')); this.cdr.markForCheck(); },
         }));
     }
 

@@ -52,6 +52,25 @@ export interface AdminSettings {
     stripe?: { safetyCaptureDays?: number; autoCaptureBelowMinor?: number | null };
     reconciliation?: { enabled?: boolean; lookbackDays?: number; amountDrift?: boolean };
     holds?: HoldSourcesOptions;
+    email?: EmailOptions;
+}
+
+/** The look of the e-mails Checkout Guard sends (bank-transfer reminder and expiry, ops alerts). */
+export interface EmailOptions {
+    /** Store name in the header (without a logo) and the sign-off. Default: the `publicBaseUrl` host. */
+    storeName?: string;
+    /** Accent colour, `#rgb` / `#rrggbb`. Default `#155dfc`. */
+    accentColor?: string;
+    /** Absolute https URL of your logo (shown instead of the store name). */
+    logoUrl?: string;
+    /** Logo width in pixels, 40–300 (default 140). */
+    logoWidth?: number;
+    /** Support address shown to customers. */
+    supportEmail?: string;
+    /** Footer or legal line (company name, registration, address). */
+    footerText?: string;
+    /** Storefront URL the header links to. */
+    storeUrl?: string;
 }
 
 /** The slice of `CheckoutGuardPluginOptions` the settings touch (kept structural to avoid an import cycle). */
@@ -64,6 +83,7 @@ export interface MergeableOptions {
     stripe?: { safetyCaptureDays?: number; autoCaptureBelowMinor?: number; [k: string]: unknown };
     reconciliation?: { enabled?: boolean; lookbackDays?: number; amountDrift?: boolean };
     holds?: HoldSourcesOptions;
+    email?: EmailOptions;
     [k: string]: unknown;
 }
 
@@ -187,8 +207,43 @@ export function sanitiseAdminSettings(input: unknown): AdminSettings {
             huloPaymentsSafetyCapture: field('holds.huloPaymentsSafetyCapture', () => bool(i.holds.huloPaymentsSafetyCapture)),
         });
     }
+    if (i.email && typeof i.email === 'object') out.email = sanitiseEmailOptions(i.email);
     for (const k of Object.keys(out) as Array<keyof AdminSettings>) if (out[k] === undefined) delete out[k];
     return out;
+}
+
+function text(v: unknown, max: number): string | undefined {
+    if (v === undefined || v === null) return undefined;
+    if (typeof v !== 'string') throw new Error('Expected text');
+    const t = v.trim();
+    if (!t) return undefined;
+    if (t.length > max) throw new Error(`At most ${max} characters`);
+    if (/[<>]/.test(t)) throw new Error('Must not contain < or >');
+    return t;
+}
+
+/** Validate the e-mail look. Empty values fall back to the code's options. */
+export function sanitiseEmailOptions(e: Record<string, any>): EmailOptions | undefined {
+    const accentColor = field('email.accentColor', () => text(e.accentColor, 7));
+    if (accentColor && !/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(accentColor)) throw new Error('email.accentColor: use a hex colour such as #155dfc');
+    const url = (label: string, v: unknown) => field(label, () => {
+        const u = text(v, 500);
+        if (u === undefined) return undefined;
+        if (!/^https:\/\/[^\s"']+$/i.test(u)) throw new Error('use an absolute https:// URL');
+        try { new URL(u); } catch { throw new Error('not a valid URL'); }
+        return u;
+    });
+    const supportEmail = field('email.supportEmail', () => text(e.supportEmail, 254));
+    if (supportEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(supportEmail)) throw new Error('email.supportEmail: not an e-mail address');
+    return prune({
+        storeName: field('email.storeName', () => text(e.storeName, 100)),
+        accentColor,
+        logoUrl: url('email.logoUrl', e.logoUrl),
+        logoWidth: field('email.logoWidth', () => int(e.logoWidth, 40, 300)),
+        supportEmail,
+        footerText: field('email.footerText', () => text(e.footerText, 500)),
+        storeUrl: url('email.storeUrl', e.storeUrl),
+    });
 }
 
 /** `bankTransfer.emails` may be `true` or `{ enabled: true }` in init options. */
@@ -230,6 +285,7 @@ export function mergeAdminSettings<T extends MergeableOptions>(base: T, s: Admin
     }
     if (s.reconciliation) out.reconciliation = { ...(base.reconciliation || {}), ...s.reconciliation };
     if (s.holds) out.holds = { ...(base.holds || {}), ...s.holds };
+    if (s.email) out.email = { ...(base.email || {}), ...s.email };
     return out as T;
 }
 

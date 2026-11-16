@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Logger } from '@vendure/core';
 import { fanOutOpsEvent, OpsChannels, OpsEvent } from '../ops-notify';
 import { hasPremium, loggerCtx, noteLocked, runtimeOptions } from './runtime';
+import { accentOf, EmailBranding, infoBox, paragraph, renderLayout, renderText, Row, rowsText } from '../email/layout';
 
 /**
  * Events delivered even on the free tier: the operator must hear that holds
@@ -147,21 +148,9 @@ export class OpsAlertService {
         }
         try {
             const transporter = transportFor(nodemailer, smtp);
-            const rows = [
-                ev.orderCode ? `<tr><td><b>Order</b></td><td>${escapeHtml(ev.orderCode)}</td></tr>` : '',
-                (ev.providerRef || ev.paymentIntentId) ? `<tr><td><b>Reference</b></td><td>${escapeHtml(String(ev.providerRef || ev.paymentIntentId))}</td></tr>` : '',
-                ev.amountMinor != null ? `<tr><td><b>Amount</b></td><td>${formatMinor(ev.amountMinor, ev.currency)}</td></tr>` : '',
-                ev.channelId != null ? `<tr><td><b>Channel</b></td><td>${escapeHtml(String(ev.channelId))}</td></tr>` : '',
-            ].join('');
+            const mail = composeOpsAlertEmail(ev, runtimeOptions().email);
             await Promise.race([
-                transporter.sendMail({
-                from: smtp.from, to,
-                subject: `[Checkout Guard] ${ev.event}${ev.orderCode ? ` — ${ev.orderCode}` : ''}`,
-                html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px">
-                    <p>${escapeHtml(ev.text).replace(/\n/g, '<br>')}</p>
-                    ${rows ? `<table cellpadding="4">${rows}</table>` : ''}
-                    </div>`,
-                }),
+                transporter.sendMail({ from: smtp.from, to, subject: mail.subject, text: mail.text, html: mail.html }),
                 new Promise((_, reject) => setTimeout(() => reject(new Error('smtp timeout (60 s)')), 60_000)),
             ]);
         } catch (e: any) {
@@ -173,8 +162,28 @@ export class OpsAlertService {
     }
 }
 
-function escapeHtml(s: string): string {
-    return s.replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch] as string));
+/**
+ * The ops alert e-mail to the merchant (`ops.adminEmail`): the compact
+ * admin variant of the shared layout, with a plain-text part. Pure.
+ * The subject is unchanged from earlier versions, so mail filters keep working.
+ */
+export function composeOpsAlertEmail(ev: OpsEvent, branding?: EmailBranding | null): { subject: string; text: string; html: string } {
+    const subject = `[Checkout Guard] ${ev.event}${ev.orderCode ? ` — ${ev.orderCode}` : ''}`;
+    const rows: Row[] = [];
+    if (ev.orderCode) rows.push({ label: 'Order', value: String(ev.orderCode), mono: true });
+    if (ev.providerRef || ev.paymentIntentId) rows.push({ label: 'Reference', value: String(ev.providerRef || ev.paymentIntentId), mono: true });
+    if (ev.amountMinor != null) rows.push({ label: 'Amount', value: formatMinor(ev.amountMinor, ev.currency) });
+    if (ev.channelId != null) rows.push({ label: 'Channel', value: String(ev.channelId) });
+    rows.push({ label: 'Event', value: ev.event, mono: true, strong: false });
+    const accent = accentOf(branding);
+    const lines = String(ev.text || '').split(/\r?\n/).filter(l => l.trim());
+    const heading = 'Checkout Guard alert';
+    const html = renderLayout({
+        branding, heading, compact: true, signOff: false, preheader: lines[0] || ev.event,
+        body: lines.map(l => paragraph(l, { compact: true })).join('') + infoBox(rows, { accent }),
+    });
+    const text = renderText({ branding, heading, signOff: false, lines: [...lines, '', ...rowsText(rows)] });
+    return { subject, text, html };
 }
 
 /** Format minor units for humans: 1234 GBP → "£12.34". Never fabricates a

@@ -28,7 +28,7 @@ import {
 import { SettingsService } from './settings/settings.service';
 import { CheckoutGuardSettingsController } from './settings/settings.controller';
 import {
-    AdminSettings, HoldSourcesOptions, LoginGuardOptions, OrderLookupLimitOptions, bankEmailsEnabled, mergeAdminSettings,
+    AdminSettings, EmailOptions, HoldSourcesOptions, LoginGuardOptions, OrderLookupLimitOptions, bankEmailsEnabled, mergeAdminSettings,
 } from './settings/admin-settings';
 import {
     ObservabilityController, ObservabilityService, OpsAlertService, CounterService, ReconciliationService,
@@ -78,6 +78,9 @@ export interface CheckoutGuardPluginOptions {
     /** Admin Settings tab may override these options (default `true`). `false`: the tab is read-only
      *  and stored overrides are ignored. */
     adminSettings?: boolean;
+    /** The look of the e-mails the plugin sends (bank-transfer reminder and expiry, ops alerts):
+     *  store name, accent colour (default `#155dfc`), logo, support address, footer. All optional. */
+    email?: EmailOptions;
     /** Where alerts go: Slack / Discord / Teams / Telegram / signed webhook / email. */
     ops?: ObservabilityOpsOptions;
     /** Anonymous `orderByCode` window for the session-bound strategy (default `2h`). */
@@ -108,6 +111,14 @@ export function getInitOptions(): CheckoutGuardPluginOptions { return cachedOpti
 export function getAdminOverrides(): AdminSettings { return adminOverrides; }
 function recomputeOptions(): void {
     effectiveOptions = cachedOptions.adminSettings === false ? cachedOptions : mergeAdminSettings(cachedOptions as any, adminOverrides) as CheckoutGuardPluginOptions;
+}
+
+/** The e-mail look in force: the `email` options, store name defaulting to the `publicBaseUrl` host. */
+export function emailBranding(): EmailOptions {
+    const o = getOptions();
+    const e = o.email || {};
+    const host = (o.publicBaseUrl || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+    return { ...e, storeName: (e.storeName || '').trim() || host };
 }
 
 /** One card-testing gate shared by the Shop API middleware and the admin blocked list. */
@@ -377,8 +388,9 @@ export class CheckoutGuardPlugin {
                 await ops.sendMail(to, mail);
             },
             storeName: () => (getOptions().publicBaseUrl || '').replace(/^https?:\/\//, '').replace(/\/.*$/, ''),
+            branding: () => emailBranding(),
         });
-        configureObservability({ getOptions: () => getOptions(), hasPremiumAccess: premium });
+        configureObservability({ getOptions: () => ({ ...getOptions(), email: emailBranding() }), hasPremiumAccess: premium });
         setGraphqlGuardRuntime({
             loginGuard: () => getOptions().loginGuard,
             orderLookup: () => getOptions().orderLookup,

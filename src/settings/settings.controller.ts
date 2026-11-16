@@ -1,8 +1,8 @@
-import { Body, Controller, Get, Post, Res } from '@nestjs/common';
+import { Body, Controller, Get, Post, Query, Res } from '@nestjs/common';
 import { Ctx, Logger, Permission, RequestContext } from '@vendure/core';
 import type { Response } from 'express';
 import { isAdminApiSession } from '@huloglobal/vendure-licence-sdk';
-import { CheckoutGuardPlugin, getAdminOverrides, getCardTestingGate, getInitOptions, getOptions } from '../plugin';
+import { CheckoutGuardPlugin, emailBranding, getAdminOverrides, getCardTestingGate, getInitOptions, getOptions } from '../plugin';
 import {
     DEFAULT_CARD_TESTING, IpBlockService, currentLimiterStore, normaliseIp, rateLimitBucket, resetFixedWindow,
     resolveCardTestingOptions, resolveMutationRateLimits, loginRule, orderClientIpField,
@@ -11,6 +11,9 @@ import { STRIPE_HOLD_DEFAULTS } from '../stripe-hold/runtime';
 import { DEFAULT_BANK_TRANSFER_EXPIRY_DAYS, DEFAULT_BANK_TRANSFER_REMINDER_AFTER_DAYS } from '../bank-transfer/bank-transfer-runtime';
 import { LOGIN_GUARD_DEFAULTS, ORDER_LOOKUP_DEFAULTS, bankEmailsEnabled, resolveLoginGuard } from './admin-settings';
 import { SettingsService } from './settings.service';
+import { DEFAULT_ACCENT } from '../email/layout';
+import { composeBankEmail } from '../bank-transfer/bank-emails';
+import { composeOpsAlertEmail } from '../observability/ops-alert.service';
 
 const loggerCtx = 'CheckoutGuard';
 /** With the per-process (memory) store, blocks stored before this process started are no longer enforced. */
@@ -71,7 +74,35 @@ export function editableView(o: ReturnType<typeof getOptions>) {
             huloPayments: o.holds?.huloPayments === true,
             huloPaymentsSafetyCapture: o.holds?.huloPaymentsSafetyCapture === true,
         },
+        email: {
+            storeName: o.email?.storeName ?? '',
+            accentColor: o.email?.accentColor ?? DEFAULT_ACCENT,
+            logoUrl: o.email?.logoUrl ?? '',
+            logoWidth: o.email?.logoWidth ?? null,
+            supportEmail: o.email?.supportEmail ?? '',
+            footerText: o.email?.footerText ?? '',
+            storeUrl: o.email?.storeUrl ?? '',
+        },
     };
+}
+
+/** A sample of each message with the e-mail look in force, for the Settings tab's preview links. */
+export function emailPreview(kind: string, branding: ReturnType<typeof emailBranding>): { subject: string; text: string; html: string } | null {
+    const payBy = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate() + 4, 23, 59, 59));
+    const details = {
+        method: 'bank-transfer' as const, accountName: 'Your account name', sortCode: '00-00-00', accountNumber: '00000000',
+        reference: 'SAMPLE1234', amountMinor: 12_000, currency: 'GBP', payBy: payBy.toISOString(), expiryDays: 7,
+    };
+    if (kind === 'reminder' || kind === 'expired') {
+        return composeBankEmail(kind, { orderCode: 'SAMPLE1234', payBy, details, branding, amountMinor: 12_000, currency: 'GBP' });
+    }
+    if (kind === 'alert') {
+        return composeOpsAlertEmail({
+            event: 'bank.stripe_unsettled', orderCode: 'SAMPLE1234', amountMinor: 12_000, currency: 'GBP', channelId: 1,
+            text: 'Sample alert: a Stripe bank transfer for order SAMPLE1234 was received by Stripe but the order is not settled yet.',
+        }, branding);
+    }
+    return null;
 }
 
 /**
@@ -80,6 +111,7 @@ export function editableView(o: ReturnType<typeof getOptions>) {
  *   GET  /checkout-guard/admin-settings           what is in force, the code's values, the saved overrides
  *   POST /checkout-guard/admin-settings           save overrides (UpdateSettings)
  *   POST /checkout-guard/admin-settings/reset     back to the code's options (UpdateSettings)
+ *   GET  /checkout-guard/email-preview?kind=      sample reminder / expired / alert e-mail (ReadOrder)
  *   GET  /checkout-guard/blocked                  card-testing blocks and login lockouts in force
  *   POST /checkout-guard/blocked/unblock { ip }   lift one (UpdateOrder)
  */
@@ -122,6 +154,20 @@ export class CheckoutGuardSettingsController {
         if (getInitOptions().adminSettings === false) return res.status(409).json({ message: 'Settings are managed in code (adminSettings: false).' });
         await this.settings.reset();
         return res.status(200).json({ ok: true, effective: editableView(getOptions()) });
+    }
+
+    @Get('email-preview')
+    async preview(@Ctx() ctx: RequestContext, @Res() res: Response, @Query('kind') kind?: string, @Query('format') format?: string) {
+        if (deny(ctx, res, 'read')) return;
+        const mail = emailPreview(String(kind || 'reminder'), emailBranding());
+        if (!mail) return res.status(400).json({ message: 'kind: use reminder, expired or alert' });
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        if (format === 'text') { res.setHeader('Content-Type', 'text/plain; charset=utf-8'); return res.send(mail.text); }
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        // The preview has no scripts; forbid them so a pasted value can never run in the admin origin.
+        res.setHeader('Content-Security-Policy', "default-src 'none'; img-src https: data:; style-src 'unsafe-inline'");
+        return res.send(mail.html);
     }
 
     @Get('blocked')

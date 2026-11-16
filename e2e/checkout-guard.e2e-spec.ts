@@ -265,7 +265,12 @@ run('@huloglobal/vendure-plugin-checkout-guard (MariaDB)', () => {
         expect(result.expired).toBeGreaterThanOrEqual(1);
         const [row] = await raw().query('SELECT state FROM `order` WHERE id = ?', [num(order.id)]);
         expect(row.state).toBe('Cancelled');
-        const events = await raw().query(`SELECT kind FROM checkout_guard_payment_event WHERE kind = 'bank_expired' AND orderId = ?`, [num(order.id)]);
+        // The expiry event is recorded by an EventBus subscriber, after the sweep's transaction: poll briefly.
+        let events: any[] = [];
+        for (let i = 0; i < 40 && !events.length; i++) {
+            events = await raw().query(`SELECT kind FROM checkout_guard_payment_event WHERE kind = 'bank_expired' AND orderId = ?`, [num(order.id)]);
+            if (!events.length) await new Promise(r => setTimeout(r, 100));
+        }
         expect(events.length).toBeGreaterThanOrEqual(1);
     });
 
@@ -593,6 +598,26 @@ run('@huloglobal/vendure-plugin-checkout-guard (MariaDB)', () => {
             const digest = await admin('digest/settings');
             expect(digest.json.premium).toBe(false);
             expect(digest.json.nextDueAt).toBeNull();
+        });
+
+        it('0.5.0: e-mail appearance is saved, validated and previewed (admin only)', async () => {
+            const anon = await fetch(`${BASE}/checkout-guard/email-preview?kind=reminder`);
+            expect(anon.status).toBe(403);
+            const bad = await admin('admin-settings', { method: 'POST', body: { settings: { email: { accentColor: 'red' } } } });
+            expect(bad.status).toBe(400);
+            const ok = await admin('admin-settings', { method: 'POST', body: { settings: { email: { storeName: 'E2E Shop', accentColor: '#ff0066', supportEmail: 'help@e2e.test' } } } });
+            expect(ok.status).toBe(200);
+            expect(ok.json.effective.email).toMatchObject({ storeName: 'E2E Shop', accentColor: '#ff0066', supportEmail: 'help@e2e.test' });
+            const res = await fetch(`${BASE}/checkout-guard/email-preview?kind=reminder`, { headers: { authorization: `Bearer ${token}` } });
+            expect(res.status).toBe(200);
+            expect(res.headers.get('content-security-policy')).toContain("default-src 'none'");
+            const html = await res.text();
+            expect(html).toContain('E2E Shop');
+            expect(html).toContain('border-bottom:3px solid #ff0066');
+            expect(html).toContain('SAMPLE1234');
+            const text = await fetch(`${BASE}/checkout-guard/email-preview?kind=alert&format=text`, { headers: { authorization: `Bearer ${token}` } });
+            expect(await text.text()).toContain('Event: bank.stripe_unsettled');
+            expect((await admin('email-preview?kind=nope')).status).toBe(400);
         });
 
         it('reset returns to the code options', async () => {

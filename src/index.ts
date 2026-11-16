@@ -19,5 +19,7 @@ export { fanOutOpsEvent, OpsChannels, OpsEvent } from './ops-notify';
 export { SettingsService, SETTINGS_PREF_KEY } from './settings/settings.service';
 export {
     sanitiseAdminSettings, mergeAdminSettings, resolveLoginGuard, resolveOrderLookup, AdminSettings, LoginGuardOptions,
-    OrderLookupLimitOptions, HoldSourcesOptions,
+    OrderLookupLimitOptions, HoldSourcesOptions, EmailOptions, sanitiseEmailOptions,
 } from './settings/admin-settings';
+export { EmailBranding, DEFAULT_ACCENT } from './email/layout';
+export { emailBranding } from './plugin';

@@ -1,4 +1,5 @@
 import { Logger } from '@vendure/core';
+import type { EmailBranding } from '../email/layout';
 
 /**
  * Observability module — runtime contract.
@@ -41,6 +42,8 @@ export interface ObservabilityOptions {
     reconciliation?: { enabled?: boolean; lookbackDays?: number; amountDrift?: boolean };
     trustedClientIp?: { header?: string; secretHeader?: string; secret?: string; trustedProxies?: string[]; trustCloudflareHeader?: boolean };
     ops?: ObservabilityOpsOptions;
+    /** The merchant's e-mail look (store name, accent, logo) for the ops alert e-mail. */
+    email?: EmailBranding;
 }
 
 export interface ObservabilityRuntime {

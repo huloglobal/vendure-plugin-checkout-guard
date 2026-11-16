@@ -14,7 +14,7 @@
  */
 export { ObservabilityController } from './observability.controller';
 export { ObservabilityService, isPaymentEventKind } from './observability.service';
-export { OpsAlertService, formatMinor } from './ops-alert.service';
+export { OpsAlertService, formatMinor, composeOpsAlertEmail } from './ops-alert.service';
 export { CounterService, dayKey } from './counter.service';
 export { ReconciliationService, ReconciliationRunResult, ReconciliationStatus } from './reconciliation.service';
 export { AmountDriftSubscriber } from './amount-drift.subscriber';
