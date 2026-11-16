@@ -437,10 +437,13 @@ export class BankTransferService implements OnModuleInit, OnApplicationBootstrap
                     result.expired++;
                     Logger.info(`Expired unpaid bank transfer for order ${payment.order.code} (payment ${payment.id})`, loggerCtx);
                 } else if (decision.remind) {
-                    await this.db.query(
+                    // Claim the reminder: only the run that stamps reminderSentAt publishes it,
+                    // so two overlapping sweeps never send the customer two e-mails.
+                    const claim: any = await this.db.query(
                         `UPDATE checkout_guard_bank_transfer SET reminderSentAt = NOW() WHERE paymentId = ? AND reminderSentAt IS NULL`,
-                        [payment.id],
+                        [payment.id], { needAffected: true },
                     );
+                    if (Number(claim?.affectedRows ?? 0) < 1) continue;
                     await this.eventBus.publish(new BankTransferReminderEvent(ctx, payment.order, payment, decision.expiresAt));
                     result.reminded++;
                     Logger.info(`Bank transfer reminder due for order ${payment.order.code} (payment ${payment.id})`, loggerCtx);

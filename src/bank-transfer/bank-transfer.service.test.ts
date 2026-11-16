@@ -170,6 +170,7 @@ describe('sweep', () => {
     });
 
     it('expires past-due transfers, reminds mid-window ones, skips those no longer Authorized', async () => {
+        sqlRoutes.push({ re: /SET reminderSentAt = NOW\(\)/, rows: () => ({ affectedRows: 1 }) as any });
         sqlRoutes.push({ re: /MAX\(occ\.`channelId`\)/, rows: () => [
             candidate(51, days(10), days(3)),            // expired 3 days ago
             candidate(52, days(4), days(-3)),            // reminder due (3 days elapsed), not expired
@@ -197,6 +198,15 @@ describe('sweep', () => {
         expect(reminded).toBeInstanceOf(BankTransferReminderEvent);
         expect(reminded.payment.id).toBe(52);
         expect(orders.cancelOrder).toHaveBeenCalledTimes(1);
+    });
+
+    it('publishes a reminder only when this run claimed it (no duplicate e-mail from an overlapping sweep)', async () => {
+        sqlRoutes.push({ re: /SET reminderSentAt = NOW\(\)/, rows: () => ({ affectedRows: 0 }) as any });
+        sqlRoutes.push({ re: /MAX\(occ\.`channelId`\)/, rows: () => [candidate(52, days(4), days(-3))] });
+        conn.repo(Payment).rows = [bankPayment({ id: 52, createdAt: days(4), order: { id: 152, code: 'ORD52', state: 'PaymentAuthorized', currencyCode: 'GBP', channels: [channels[1]] } })];
+        const r = await svc.sweep();
+        expect(r.reminded).toBe(0);
+        expect(eventBus.publish).not.toHaveBeenCalled();
     });
 
     it('leaves a transfer alone when the cancellation fails, and finishes stranded orders on the next pass', async () => {
