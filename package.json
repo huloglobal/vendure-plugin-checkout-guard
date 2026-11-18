@@ -47,7 +47,7 @@
         "@types/nodemailer": "^6.4.24",
         "@vendure/core": "3.8.2",
         "mysql2": "^3.24.6",
-        "nodemailer": "^6.10.1",
+        "nodemailer": "^10.5.0",
         "typescript": "^5.9.3",
         "vitest": "^2.1.9"
     },
