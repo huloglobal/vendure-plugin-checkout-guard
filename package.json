@@ -1,6 +1,6 @@
 {
     "name": "@huloglobal/vendure-plugin-checkout-guard",
-    "version": "0.5.0",
+    "version": "0.5.1",
     "description": "The safety layer around Vendure checkout: Stripe manual-capture holds that place the order, bank transfer with expiry, decline and orphaned payment tracking with Stripe reconciliation, session-bound order lookup, card-testing and login guards, shared checkout rate limits and funnel tracking.",
     "license": "AGPL-3.0-only",
     "author": "Wayne Garrison <wayne@garrison.me.uk>",

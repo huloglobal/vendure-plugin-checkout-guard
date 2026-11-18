@@ -5,6 +5,11 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-11-18
+
+### Fixed
+- Card-testing gate: storefront-reported `exception` (a site error) and `intent_create_failed` (the gate's own refusal) no longer count as failed payments. One checkout glitch could lock a genuine buyer out of their order, and every retry then fed the block.
+
 ## [0.5.0] — 2026-11-16
 
 Improvement round. **Nothing changes by default**: the e-mail look is new and optional, the subjects, recipients

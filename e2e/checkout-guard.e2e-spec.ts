@@ -431,6 +431,20 @@ run('@huloglobal/vendure-plugin-checkout-guard (MariaDB)', () => {
         expect(summary).toHaveProperty('failed7d');
     });
 
+    it('site errors and the gate own refusal are not counted as card declines', async () => {
+        const ip = '203.0.113.77';
+        const orderCode = 'NOTADECLINE1';
+        for (const code of ['exception', 'intent_create_failed', 'exception']) {
+            await obs().recordPaymentEvent({ channelId: 1, kind: 'client_declined', provider: 'stripe', ip, orderCode, code } as any);
+        }
+        expect(await obs().countRecentFailures(ip, 60)).toBe(0);
+        expect(await obs().countRecentFailuresForOrder(orderCode, 60)).toBe(0);
+        await obs().recordPaymentEvent({ channelId: 1, kind: 'client_declined', provider: 'stripe', ip, orderCode, code: 'card_declined' } as any);
+        await obs().recordPaymentEvent({ channelId: 1, kind: 'client_declined', provider: 'stripe', ip, orderCode } as any);
+        expect(await obs().countRecentFailures(ip, 60)).toBe(2);
+        expect(await obs().countRecentFailuresForOrder(orderCode, 60)).toBe(2);
+    });
+
     it('holds listing answers for an admin', async () => {
         await adminClient.asSuperAdmin();
         const token = (adminClient as any).authToken as string;

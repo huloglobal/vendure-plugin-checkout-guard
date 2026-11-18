@@ -50,6 +50,14 @@ export function isPaymentEventKind(v: unknown): v is PaymentEventKind {
 }
 
 /**
+ * Client-reported codes that are not the buyer's card being refused: the
+ * storefront's own exceptions and the card-testing gate's own refusal to mint
+ * an intent. Counting them let one site glitch lock a genuine buyer out, and
+ * the gate then fed itself on every retry.
+ */
+export const NOT_A_DECLINE_CODES = ['exception', 'intent_create_failed'] as const; // inlined in the failure-count SQL
+
+/**
  * Payment-event and funnel-event store plus the admin summaries.
  *
  * Both tables are plain SQL through the licence-sdk dialect adapter, so
@@ -150,6 +158,7 @@ export class ObservabilityService implements OnModuleInit {
         const minutes = Math.max(1, Math.min(60 * 24 * 30, Math.floor(Number(windowMinutes) || 60)));
         let sql = `SELECT COUNT(*) AS n FROM ${PAYMENT_EVENT_TABLE}
              WHERE ip = ? AND kind IN ('failed', 'client_declined')
+               AND (code IS NULL OR code NOT IN ('exception', 'intent_create_failed'))
                AND createdAt > DATE_SUB(NOW(), INTERVAL ? MINUTE)`;
         const params: unknown[] = [ip, minutes];
         // An admin unblock: attempts before it no longer count.
@@ -170,6 +179,7 @@ export class ObservabilityService implements OnModuleInit {
         const [row] = await this.db.query(
             `SELECT COUNT(*) AS n FROM ${PAYMENT_EVENT_TABLE}
              WHERE orderCode = ? AND kind IN ('failed', 'client_declined')
+               AND (code IS NULL OR code NOT IN ('exception', 'intent_create_failed'))
                AND createdAt > DATE_SUB(NOW(), INTERVAL ? MINUTE)`,
             [code, minutes],
         ).catch(() => [{ n: 0 }]);
