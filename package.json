@@ -43,7 +43,7 @@
         "@nestjs/common": "^12.5.0",
         "@nestjs/core": "^12.5.0",
         "@nestjs/schedule": "^12.0.4",
-        "@types/node": "^20.19.43",
+        "@types/node": "^26.6.6",
         "@types/nodemailer": "^6.4.24",
         "@vendure/core": "3.8.2",
         "mysql2": "^3.24.6",
