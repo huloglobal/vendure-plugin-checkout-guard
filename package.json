@@ -48,7 +48,7 @@
         "@vendure/core": "3.8.2",
         "mysql2": "^3.24.6",
         "nodemailer": "^6.10.1",
-        "typescript": "^5.9.3",
+        "typescript": "^7.0.2",
         "vitest": "^2.1.9"
     },
     "keywords": [
